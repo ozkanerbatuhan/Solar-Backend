@@ -1,13 +1,29 @@
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import logging
+from sqlalchemy import text
 
-from app.api.routes import inverter_routes, model_routes, data_routes, weather_routes
+# Veritabanı ve modeller
 from app.db.database import engine, Base, get_db
+from app.models import model, inverter, weather
 from app.core.config import settings
 
+# API rotaları
+from app.api.routes import inverter_routes, model_routes, data_routes, weather_routes
+
+# Loglama yapılandırması
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Veritabanı tablolarını oluştur
-Base.metadata.create_all(bind=engine)
+try:
+    logger.info("Veritabanı tablolarını oluşturma başlıyor...")
+    Base.metadata.create_all(bind=engine)
+    logger.info("Veritabanı tabloları başarıyla oluşturuldu.")
+except Exception as e:
+    logger.error(f"Veritabanı tablolarını oluştururken hata: {e}")
+    # Hataya rağmen uygulamayı çalıştırmaya devam et
 
 # FastAPI uygulamasını oluştur
 app = FastAPI(
@@ -46,8 +62,16 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Sağlık kontrolü endpoint'i"""
+    try:
+        # Bağlantı durumunu kontrol etme
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            db_status = "connected"
+    except Exception as e:
+        db_status = f"disconnected (error: {str(e)})"
+    
     return {
         "status": "healthy",
         "api_version": "0.1.0",
-        "database": "connected"
+        "database": db_status
     } 

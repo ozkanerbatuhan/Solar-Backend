@@ -7,6 +7,7 @@ from app.db.database import Base
 class Inverter(Base):
     """İnverter verilerini saklayan model."""
     __tablename__ = "inverters"
+    __table_args__ = {'extend_existing': True}
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), unique=True, index=True)
@@ -28,6 +29,7 @@ class Inverter(Base):
 class InverterData(Base):
     """İnverter ölçüm verilerini saklayan model."""
     __tablename__ = "inverter_data"
+    __table_args__ = {'extend_existing': True}
     
     id = Column(Integer, primary_key=True, index=True)
     inverter_id = Column(Integer, ForeignKey("inverters.id"), nullable=False)
@@ -46,6 +48,7 @@ class InverterData(Base):
 class InverterPrediction(Base):
     """İnverter güç çıktı tahminlerini saklayan model."""
     __tablename__ = "inverter_predictions"
+    __table_args__ = {'extend_existing': True}
     
     id = Column(Integer, primary_key=True, index=True)
     inverter_id = Column(Integer, ForeignKey("inverters.id"), nullable=False)
@@ -62,8 +65,13 @@ class InverterPrediction(Base):
     def __repr__(self):
         return f"<InverterPrediction {self.inverter_id} for {self.prediction_timestamp}>"
 
+# Model sınıfını kaldırıyoruz, çünkü app/models/model.py içinde zaten tanımlandı
+# Burada tanımlanmış olması çakışmaya neden oluyor
+# Bu sınıfı kaldırmak yerine yorum satırı yapıyoruz, gerekirse referans için
+
+"""
 class Model(Base):
-    """Makine öğrenimi modellerinin meta verilerini saklayan model."""
+    # Makine öğrenimi modellerinin meta verilerini saklayan model.
     __tablename__ = "models"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -75,3 +83,4 @@ class Model(Base):
     
     # İlişkiler
     inverter = relationship("Inverter") 
+""" 

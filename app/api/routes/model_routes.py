@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 
 from app.db.database import get_db
-from app.models.model import Model as ModelDB
+from app.models.model import Model
 from app.models.inverter import Inverter
 from app.schemas.model import ModelInfo, ModelMetrics, ModelTrainingResponse
 from app.services.model_training_service import train_model, train_all_models, get_model_metrics, get_all_model_metrics
@@ -20,7 +20,7 @@ async def create_model(model: ModelInfo, db: Session = Depends(get_db)):
     if inverter is None:
         raise HTTPException(status_code=404, detail="Inverter bulunamadı")
     
-    db_model = ModelDB(**model.model_dump())
+    db_model = Model(**model.model_dump())
     db.add(db_model)
     db.commit()
     db.refresh(db_model)
@@ -44,21 +44,21 @@ def list_models(
         limit: Alınacak maksimum kayıt sayısı
         db: Veritabanı oturumu
     """
-    query = db.query(ModelDB)
+    query = db.query(Model)
     
     if inverter_id is not None:
-        query = query.filter(ModelDB.inverter_id == inverter_id)
+        query = query.filter(Model.inverter_id == inverter_id)
     
     if active_only:
-        query = query.filter(ModelDB.is_active == True)
+        query = query.filter(Model.is_active == True)
     
-    models = query.order_by(ModelDB.created_at.desc()).offset(skip).limit(limit).all()
+    models = query.order_by(Model.created_at.desc()).offset(skip).limit(limit).all()
     return models
 
 @router.get("/models/{model_id}", response_model=ModelInfo)
 def read_model(model_id: int, db: Session = Depends(get_db)):
     """Belirli bir modeli ID'sine göre getirir."""
-    model = db.query(ModelDB).filter(ModelDB.id == model_id).first()
+    model = db.query(Model).filter(Model.id == model_id).first()
     if model is None:
         raise HTTPException(status_code=404, detail="Model bulunamadı")
     return model

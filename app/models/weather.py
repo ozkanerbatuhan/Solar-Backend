@@ -7,6 +7,7 @@ from app.db.database import Base
 class WeatherData(Base):
     """Hava durumu ölçüm verilerini saklayan model."""
     __tablename__ = "weather_data"
+    __table_args__ = {'extend_existing': True}
     
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
@@ -29,6 +30,7 @@ class WeatherData(Base):
 class WeatherForecast(Base):
     """Gelecek hava durumu tahminlerini saklayan model."""
     __tablename__ = "weather_forecasts"
+    __table_args__ = {'extend_existing': True}
     
     id = Column(Integer, primary_key=True, index=True)
     forecast_timestamp = Column(DateTime, index=True)  # Tahmin edilen zaman

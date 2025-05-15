@@ -1,5 +1,6 @@
 import os
 import joblib
+import random
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional, Union
@@ -7,8 +8,8 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 import json
 
-from app.models.inverter import InverterPrediction, Model, Inverter
-from app.models.model import Model as ModelDB
+from app.models.inverter import InverterPrediction, Inverter
+from app.models.model import Model
 from app.models.weather import WeatherForecast
 from app.core.config import settings
 
@@ -113,9 +114,9 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
         tuple: (model, model_meta) - Yüklenen model ve meta verileri
     """
     # Inverter için aktif modeli kontrol et
-    active_model = db.query(ModelDB).filter(
-        ModelDB.inverter_id == inverter_id,
-        ModelDB.is_active == True
+    active_model = db.query(Model).filter(
+        Model.inverter_id == inverter_id,
+        Model.is_active == True
     ).first()
     
     if active_model is None:
@@ -123,18 +124,23 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
     
     # Model dosyasının yolunu oluştur
     model_path = active_model.model_path
+    if not model_path:
+        return None, None
+    
+    # Tam dosya yolunu oluştur
+    full_model_path = os.path.join(MODELS_DIR, model_path)
     
     # Model meta verisi için dosya yolunu oluştur
     model_version = active_model.version
     meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
     
     # Modelin var olup olmadığını kontrol et
-    if not os.path.exists(model_path):
+    if not os.path.exists(full_model_path):
         return None, None
     
     try:
         # Modeli yükle
-        model = joblib.load(model_path)
+        model = joblib.load(full_model_path)
         
         # Meta verileri yükle
         model_meta = active_model.metrics
@@ -332,7 +338,7 @@ async def train_model(inverter_id: int, db: Session):
     new_model = Model(
         inverter_id=inverter_id,
         version=new_version,
-        file_path=model_filename,
+        model_path=model_filename,
         metrics=model_metrics
     )
     

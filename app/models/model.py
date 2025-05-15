@@ -9,6 +9,7 @@ class Model(Base):
     Eğitilmiş makine öğrenimi modellerinin veritabanı tablosu.
     """
     __tablename__ = "models"
+    __table_args__ = {'extend_existing': True}
 
     id = Column(Integer, primary_key=True, index=True)
     inverter_id = Column(Integer, ForeignKey("inverters.id"), nullable=False)

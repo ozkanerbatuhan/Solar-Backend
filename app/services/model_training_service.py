@@ -14,7 +14,7 @@ import pathlib
 
 from app.models.inverter import Inverter, InverterData
 from app.models.weather import WeatherData
-from app.models.model import Model as ModelDB
+from app.models.model import Model
 
 # Model eğitim ve tahmin için parametreler
 MODEL_PARAMS = {
@@ -237,7 +237,7 @@ async def train_model(
         json.dump(model_meta, f, indent=2)
     
     # Veritabanına model kaydı ekle
-    model_db = ModelDB(
+    model_db = Model(
         inverter_id=inverter_id,
         version=model_version,
         model_path=model_path,
@@ -249,9 +249,9 @@ async def train_model(
     )
     
     # Önceki aktif modelleri devre dışı bırak
-    previous_models = db.query(ModelDB).filter(
-        ModelDB.inverter_id == inverter_id,
-        ModelDB.is_active == True
+    previous_models = db.query(Model).filter(
+        Model.inverter_id == inverter_id,
+        Model.is_active == True
     ).all()
     
     for model in previous_models:
@@ -302,9 +302,9 @@ async def get_model_metrics(inverter_id: int, db: Session) -> Dict[str, Any]:
     Returns:
         Model metrikleri
     """
-    model = db.query(ModelDB).filter(
-        ModelDB.inverter_id == inverter_id,
-        ModelDB.is_active == True
+    model = db.query(Model).filter(
+        Model.inverter_id == inverter_id,
+        Model.is_active == True
     ).first()
     
     if not model:
@@ -334,7 +334,7 @@ async def get_all_model_metrics(db: Session) -> Dict[int, Dict[str, Any]]:
     Returns:
         Tüm modellerin metrikleri
     """
-    models = db.query(ModelDB).filter(ModelDB.is_active == True).all()
+    models = db.query(Model).filter(Model.is_active == True).all()
     results = {}
     
     for model in models:
