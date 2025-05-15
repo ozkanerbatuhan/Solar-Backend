@@ -1,0 +1,66 @@
+# Proje Kuralları ve Desenleri
+
+## Dosya İsimlendirme ve Organizasyon
+- FastAPI route'ları için app/api/routes/ dizini kullanılacak
+- Route isimlendirmesi {özellik}_routes.py formatında olacak (örn. prediction_routes.py)
+- Veritabanı modelleri app/models/ dizininde bulunacak
+- Pydantic şemaları app/schemas/ dizininde bulunacak
+- Servis kodları app/services/ dizininde bulunacak
+- Makine öğrenimi modelleri app/ml/ dizininde bulunacak
+
+## Kod Stili ve Standartları
+- PEP 8 stil rehberi takip edilecek
+- Type hint'ler kullanılacak
+- Docstring'ler için Google stil formatı kullanılacak
+- Async/await pattern tercihi
+
+## API Endpoint Standartları
+- RESTful API tasarım prensipleri
+- URL formatlama /api/v1/{resource}/{id?} şeklinde olacak
+- HTTP metodları doğru kullanımı: GET, POST, PUT, DELETE
+- Arama ve filtreleme için query parametreleri
+- Sayfalama için standart limit ve offset parametreleri
+
+## Veritabanı Etkileşimi
+- SQLAlchemy ORM kullanımı
+- Alembic ile migrasyon yönetimi
+- Repository pattern ile veri erişimi
+- Bağlantı havuzlarının doğru kullanımı
+
+## Hata Yönetimi
+- HTTPException ile tutarlı hata yanıtları
+- Uygun HTTP durum kodları kullanımı
+- Detaylı hata mesajları
+- Güvenlik açısından hassas bilgilerin gizlenmesi
+
+## Loglama
+- Yapılandırılabilir log seviyeleri
+- Performans metriklerinin loglanması
+- Hata durumlarının detaylı loglanması
+- Request/response loglaması
+
+## Makine Öğrenimi Modelleri
+- Modeller sürümlendirilmeli
+- Model metaverisi (eğitim tarihi, doğruluk, vb.) saklanmalı
+- Modellerin disk üzerinde etkili depolanması
+- Lazy loading ile model yükleme
+
+## Güvenlik
+- Environment değişkenleri ile gizli bilgi yönetimi
+- SQL injection koruması
+- API rate limiting uygulanması
+- İstek validasyonu
+
+## Test Standartları
+- Unit testler için pytest kullanımı
+- API endpoint'leri için integration testleri
+- Mock kullanımı
+- Test coverage takibi
+
+## Proje Özellikleri
+- İnverter kayıtlarının yönetimi için CRUD işlemleri
+- İnverter ölçüm verilerinin kaydedilmesi ve sorgulanması
+- Güç çıktısı tahminlerinin oluşturulması ve sorgulanması
+- Model eğitimi ve yönetimi için API endpoint'leri
+- Gelecekte makine öğrenimi model entegrasyonu
+- PostgreSQL veritabanı entegrasyonu 
