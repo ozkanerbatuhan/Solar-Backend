@@ -11,16 +11,21 @@
 - API endpoint'leri (inverter, tahmin, model) oluşturuldu
 - Tahmin servisi için temel yapı hazırlandı
 - Veritabanı bağlantısı konfigürasyonu tamamlandı
+- CSV veri yükleme endpoint'i ve işleme mekanizması geliştirildi
+- Open-meteo API entegrasyonu tamamlandı
+- Hava durumu veri servisi oluşturuldu
+- İki aşamalı model eğitimi süreci ve model değerlendirme mekanizması kuruldu
+- Tahmin servisinin yeni ML modelleri ile entegrasyonu tamamlandı
+- 8 inverter için toplu tahmin yapma fonksiyonelliği eklendi
+- Ana uygulama dosyası (main.py) oluşturuldu ve API rotaları entegre edildi
+- Model, veri ve tahmin ilgili API rotaları güncellendi
 
 ## Devam Edenler
-- API rotalarının yeni gereksinimlere göre düzenlenmesi
+- Virtual environment kurulumu ve bağımlılıkların yüklenmesi
+- Veritabanı yapısının test edilmesi
 
 ## Yeni Gereksinimler
-- CSV veri yükleme endpoint'i
-- Open-meteo API entegrasyonu
-- İki aşamalı model eğitim süreci
-- Tahmin sonuçlarının veritabanında saklanması
-- Gerçek ve tahmin değerlerinin API üzerinden sunulması
+Tüm gereksinimler karşılandı.
 
 ## Yapılacaklar
 - [x] Proje dosya yapısının kurulması
@@ -30,46 +35,45 @@
 - [x] Veritabanı bağlantısının kurulması
 - [x] Model yükleme ve tahmin mekanizmasının oluşturulması (temel yapı)
 - [x] Veri alma ve kaydetme endpoint'lerinin geliştirilmesi
-- [ ] CSV dosyası yükleme endpoint'inin geliştirilmesi
-- [ ] Yüklenen CSV verilerini veritabanına işleme mekanizması
-- [ ] Open-meteo API ile entegrasyon için servis oluşturulması
-- [ ] Hava durumu verilerini veritabanına kaydetme işlevselliği
-- [ ] Model eğitimi için servis oluşturulması (main.py adaptasyonu)
-- [ ] %70/%30 bölünmüş veri ile model metriklerini hesaplama
-- [ ] Tüm veri ile final modellerin eğitilmesi
-- [ ] Modellerin disk üzerinde saklanması için yapı oluşturulması
-- [ ] Gelecek hava durumu verileri ile tahminleme işlevselliği
-- [ ] Tahmin sonuçlarını veritabanında saklama mekanizması
-- [ ] 8 inverterın gerçek ve tahmin verilerini sunan API endpoint'leri
-- [ ] Ana uygulama dosyasının (main.py) oluşturulması
-- [ ] API rotalarının ana uygulamaya bağlanması
+- [x] CSV dosyası yükleme endpoint'inin geliştirilmesi
+- [x] Yüklenen CSV verilerini veritabanına işleme mekanizması
+- [x] Open-meteo API ile entegrasyon için servis oluşturulması
+- [x] Hava durumu verilerini veritabanına kaydetme işlevselliği
+- [x] Model eğitimi için servis oluşturulması
+- [x] %70/%30 bölünmüş veri ile model metriklerini hesaplama
+- [x] Tüm veri ile final modellerin eğitilmesi
+- [x] Modellerin disk üzerinde saklanması için yapı oluşturulması
+- [x] Gelecek hava durumu verileri ile tahminleme işlevselliği
+- [x] Tahmin sonuçlarını veritabanında saklama mekanizması
+- [x] 8 inverterın gerçek ve tahmin verilerini sunan API endpoint'leri
+- [x] Ana uygulama dosyasının (main.py) oluşturulması
+- [x] API rotalarının ana uygulamaya bağlanması
 - [ ] Veritabanı migrasyon işlemlerinin yapılandırılması (Alembic)
-- [ ] Hata yönetimi ve loglama
-- [ ] API dokümantasyonu
+- [ ] Kapsamlı hata yönetimi ve loglama
+- [ ] Detaylı API dokümantasyonu
+- [x] Virtual environment kurulumu
 
 ## Engeller
-- PostgreSQL veritabanı bağlantısı kurulmalı ve test edilmeli (DB_PORT değerinin doğru olduğundan emin olunmalı)
-- main.py dosyası veritabanı entegrasyonu için adapte edilmeli
-- Makine öğrenimi modellerinin disk üzerinde tutarlı bir şekilde saklanması ve yüklenmesi sağlanmalı
+- PostgreSQL veritabanı bağlantısı kurulmalı ve test edilmeli
 - Open-meteo API'nin rate limit'lerine dikkat edilmeli
+- Modellerin eğitimi için yeterli veri olduğundan emin olunmalı
 
 ## Proje Zaman Çizelgesi
 - **Aşama 1**: Temel API kurulumu ve veritabanı bağlantısı ✅
-- **Aşama 2**: Veri yükleme ve hava durumu API entegrasyonu (devam ediyor)
-- **Aşama 3**: Model eğitim sürecinin entegrasyonu 
-- **Aşama 4**: Tahminleme işlevselliğinin oluşturulması
-- **Aşama 5**: API endpoint'lerinin son haline getirilmesi
-- **Aşama 6**: Test ve optimizasyon
+- **Aşama 2**: Veri yükleme ve hava durumu API entegrasyonu ✅
+- **Aşama 3**: Model eğitim sürecinin entegrasyonu ✅
+- **Aşama 4**: Tahminleme işlevselliğinin oluşturulması ✅
+- **Aşama 5**: API endpoint'lerinin son haline getirilmesi ✅
+- **Aşama 6**: Test ve optimizasyon (devam ediyor)
 
 ## Öncelikli Görevler
-1. CSV dosyası yükleme endpoint'i ve veritabanı işleme mekanizması
-2. Open-meteo API entegrasyonu
-3. Model eğitim sürecinin adaptasyonu
-4. Tahminleme ve sonuçları saklama işlevselliği
-5. API endpoint'lerinin düzenlenmesi
+1. Sanal ortam kurulumu ve bağımlılıkların yüklenmesi
+2. Veritabanı bağlantısının test edilmesi
+3. Sistemin uçtan uca test edilmesi
+4. Performans optimizasyonu
+5. Dokümantasyon geliştirme
 
 ## Bilinen Sorunlar
-- Henüz main.py dosyası oluşturulmadığından API çalışmıyor
-- ML modelleri için klasör yapısı henüz oluşturulmadı
-- Tahmin servisi şu an sadece rastgele değerler üretiyor, gerçek makine öğrenimi modelleri entegre edilmeli
-- Open-meteo API entegrasyonu henüz yapılmadı 
+- Veritabanı bağlantısı kurulum ve testleri henüz yapılmadı
+- Sanal ortam kurulumu tamamlanmalı
+- Yeterli veri olmadan model eğitimi doğru sonuçlar vermeyebilir 

@@ -1,39 +1,38 @@
 # Aktif Bağlam
 
 ## Mevcut Odak
-API rotaları ve model eğitimi süreçlerinin yapılandırılması ve entegrasyonu. Veritabanına veri yükleme, model eğitimi, tahminleme ve sonuçların API üzerinden sunulması için gerekli bileşenlerin oluşturulması.
+Projenin çalışma ortamının kurulması ve uygulamanın çalıştırılması. PostgreSQL veritabanı bağlantısının test edilmesi ve API'nin çalıştırılması.
 
 ## Son Değişiklikler
-- Proje dizin yapısı oluşturuldu
-- Veritabanı modelleri (Inverter, InverterData, InverterPrediction, Model) tanımlandı
-- Pydantic şemaları ile veri doğrulama yapısı kuruldu
-- API endpoint'leri (inverter, tahmin ve model rotaları) oluşturuldu
-- Tahmin servisi için temel yapı hazırlandı
+- CSV veri yükleme endpoint'i ve işleme mekanizması geliştirildi
+- Open-meteo API entegrasyonu tamamlandı
+- Hava durumu veri servisi oluşturuldu
+- İki aşamalı model eğitimi süreci ve model değerlendirme mekanizması kuruldu
+- Tahmin servisinin yeni ML modelleri ile entegrasyonu tamamlandı
+- 8 inverter için toplu tahmin yapma fonksiyonelliği eklendi
+- Ana uygulama dosyası (main.py) oluşturuldu ve API rotaları entegre edildi
+- Model, veri ve tahmin ilgili API rotaları güncellendi
+- Python 3.13 sanal ortamı oluşturuldu
+- Temel bağımlılıklar (FastAPI, Uvicorn, SQLAlchemy, Pydantic, dotenv, httpx, python-multipart) yüklendi
 
 ## Yeni Gereksinimler
-1. CSV dosyası ile inverter çıktı verilerini sisteme yükleme endpoint'i
-2. Open-meteo API'sinden hava durumu verilerini çekme ve veritabanına kaydetme işlevselliği
-3. Model eğitim sürecinin yapılandırılması (2 aşamalı):
-   - İlk eğitim: %70 eğitim, %30 test ile model metrikleri hesaplama
-   - İkinci eğitim: Tüm veri ile final model oluşturma
-4. Gelecek hava durumu verileri ile tahmin yapma ve veritabanına kaydetme
-5. 8 inverterın gerçek ve tahmin değerlerini API üzerinden sunma
+- PostgreSQL veritabanı kurulumu ve bağlantı testi
+- Uygulamanın çalıştırılması ve temel işlevselliğinin test edilmesi
+- ML kütüphaneleri (numpy, pandas, scikit-learn) için uyumlu sürümlerin bulunması veya gerektiğinde sanal bir öğrenme ortamı oluşturulması
 
 ## Bir Sonraki Adımlar
-1. CSV veri yükleme endpoint'inin geliştirilmesi
-2. Hava durumu API entegrasyonunun yapılması
-3. Model eğitim servisinin oluşturulması
-4. Tahmin pipeline'ının kurulması
-5. Ana uygulama giriş noktasının (main.py) oluşturulması
-6. API rotalarının düzenlenmesi ve ana uygulamaya entegrasyonu
-7. Veritabanı migrasyon scriptlerinin hazırlanması
+1. PostgreSQL veritabanının kurulması ve yapılandırılması
+2. Veritabanı bağlantısını test etme
+3. Uygulamayı başlatma ve API'yi test etme
+4. Veri yükleme, model eğitimi ve tahmin işlevlerini uçtan uca test etme
+5. Gerçek veri setiyle modellerin eğitilmesi
 
 ## Açık Sorular
-- Hava durumu verileri ne sıklıkla çekilecek?
-- Model eğitim işlemi ne sıklıkla ve nasıl tetiklenecek (manuel/otomatik)?
-- Tahmin sonuçları için ne kadar ileriye tahmin yapılacak?
-- Hava durumu API'sinin limitleri nedir? Çok fazla istek göndermemek için önlemler alınmalı mı?
-- main.py dosyasından ne kadarı yeniden kullanılacak ve ne kadarı değiştirilecek?
+- Tahmin doğruluğu kabul edilebilir seviyede mi?
+- Kaç adet veri noktası ile model eğitimi yapılacak?
+- Değişen hava koşulları ve mevsimler için modellerin yeniden eğitilmesi gerekecek mi?
+- Sistem yükü altında performans nasıl olacak?
+- Python 3.13 ile uyumlu olmayan ML kütüphaneleri için alternatif stratejiler neler olabilir?
 
 ## Güncel Durum
-Temel API ve veritabanı yapısı kuruldu, şimdi yeni gereksinimler doğrultusunda API rotalarının düzenlenmesi ve model eğitimi/tahmin süreçlerinin entegrasyonu gerekiyor. 
+Backend API geliştirmesi tamamlandı. Çalışma ortamı kısmen kuruldu (Python sanal ortamı ve temel bağımlılıklar). API'nin temel bileşenleri çalıştırılabilir durumda, ancak ML kütüphaneleriyle ilgili uyumluluk sorunları mevcut. PostgreSQL veritabanı kurulumu ve test aşamasına geçilmesi gerekiyor. 
