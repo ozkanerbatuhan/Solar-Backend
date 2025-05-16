@@ -35,10 +35,8 @@ class Settings(BaseSettings):
             username=values.get("POSTGRES_USER"),
             password=values.get("POSTGRES_PASSWORD"),
             host=values.get("POSTGRES_SERVER"),
-            port=values.get(
-                "POSTGRES_PORT"
-            ),  # String'e dönüştürmeden direkt integer olarak geçirin
-            path=f"/{values.get('POSTGRES_DB') or ''}",
+            port=values.get("POSTGRES_PORT"),
+            path=f"{values.get('POSTGRES_DB') or ''}"
         )
         return str(dns)
     # CORS ayarları

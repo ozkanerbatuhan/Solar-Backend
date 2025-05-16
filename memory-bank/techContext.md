@@ -19,13 +19,18 @@
   - Şema tanımlamaları
   - Validasyon kuralları
   - Model dönüşümleri
-- **Uvicorn/Gunicorn**: ASGI sunucu (henüz yapılandırılmadı)
+- **Uvicorn/Gunicorn**: ASGI sunucu
+- **Docker/Docker Compose**: Konteynerizasyon
+  - Uygulama ve veritabanı konteynerleri
+  - Ortam bağımsız çalışma imkanı
+  - Kolay dağıtım ve ölçeklendirme
 
 ### Veritabanı
 - **PostgreSQL**: Ana veritabanı sistemi
   - JSON veri tipi desteği (inverter ölçümleri ve özellikler için)
   - Zaman serisi veri depolama
   - İlişkisel tablo yapıları
+  - Docker konteyneri içinde çalıştırma
 
 ### Makine Öğrenimi
 - Tahmin servisi için temel yapı oluşturuldu (placeholder)
@@ -45,14 +50,27 @@
   - `Model`: ML model metadataları
 - Config yapısı ile uygulama ayarları merkezileştirildi
 - Veri validasyonu için Pydantic şemaları kullanıldı
+- Containerizasyon için Docker ve Docker Compose yapılandırması eklendi
 
 ## Teknik Kısıtlamalar
-- PostgreSQL veritabanı bağlantısı (şu an 1234 portu kullanılıyor)
+- PostgreSQL veritabanı bağlantısı Docker konteynerinde 5432 portu üzerinden yapılıyor
 - Makine öğrenimi modellerinin disk üzerinde saklanabilmesi için ML klasörüne disk erişimi
 - API'nin performansı veri boyutuyla orantılı şekilde optimize edilmeli
 - Büyük veri aktarımında bellek yönetimi önemli
 
 ## Geliştirme Ortamı Kurulumu
+### Docker ile Kurulum (Önerilen)
+```bash
+# Docker Compose ile projeyi başlatma
+docker-compose up -d
+
+# API'ye erişim
+# http://localhost:8000
+# Swagger UI: http://localhost:8000/docs
+# ReDoc: http://localhost:8000/redoc
+```
+
+### Manuel Kurulum
 ```bash
 # Virtual environment oluşturma
 python -m venv venv
@@ -63,38 +81,41 @@ venv\Scripts\activate  # Windows
 # Bağımlılıkları yükleme
 pip install -r requirements.txt
 
-# Geliştirme sunucusunu başlatma (henüz yapılandırılmadı)
-# uvicorn app.main:app --reload
+# Geliştirme sunucusunu başlatma
+uvicorn app.main:app --reload
 ```
 
 ## Uygulama Bağımlılıkları
 Aşağıdaki paketler requirements.txt dosyasında tanımlanmıştır:
 
 ```
-fastapi>=0.104.0
-uvicorn>=0.23.2
-sqlalchemy>=2.0.23
-psycopg2-binary>=2.9.9
-alembic>=1.12.1
-pydantic>=2.4.2
-python-dotenv>=1.0.0
-scikit-learn>=1.3.2
-pandas>=2.1.2
-numpy>=1.26.1
-joblib>=1.3.2
+fastapi==0.103.1
+uvicorn==0.23.2
+sqlalchemy==2.0.21
+psycopg2-binary==2.9.7
+pydantic==2.3.0
+pydantic-settings==2.0.3
+python-dotenv==1.0.0
+httpx==0.24.1
+pandas==2.1.0
+numpy==1.25.2
+scikit-learn==1.3.0
+joblib==1.3.2
+python-multipart==0.0.6
 ```
 
 ## Veritabanı Bağlantı Bilgileri
-Veritabanı bağlantısı için bir PostgreSQL instance'ı gereklidir. Bağlantı, app/core/config.py içinde yapılandırılmıştır:
-```python
-DB_USERNAME: str = "postgres"
-DB_PASSWORD: str = "postgres"
-DB_HOST: str = "localhost"
-DB_PORT: str = "1234"  # Doğru port yapılandırılmalı
-DB_NAME: str = "solar_db"
+Veritabanı bağlantısı Docker Compose ile yönetilen bir PostgreSQL instance'ı üzerinde sağlanmaktadır:
+```
+POSTGRES_SERVER=postgres
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=solar_db
+POSTGRES_PORT=5432
 ```
 
 ## Dış Bağımlılıklar
-- PostgreSQL Veritabanı (bağlantı doğrulanmalı)
+- PostgreSQL Veritabanı (Docker ile yapılandırıldı)
 - Python 3.8+
+- Docker ve Docker Compose
 - Makine öğrenimi modelleri (gelecekte entegre edilecek) 

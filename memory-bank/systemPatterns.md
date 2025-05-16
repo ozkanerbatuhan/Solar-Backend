@@ -11,6 +11,29 @@ flowchart TD
     ML <--> DB
     API <--> WS[Hava Durumu Servisi]
     WS <--> EXT[Open-Meteo API]
+    
+    subgraph Docker
+      API
+      DB
+    end
+```
+
+## Docker Mimarisi
+Sistem, Docker ve Docker Compose kullanılarak containerize edilmiştir:
+
+```mermaid
+flowchart LR
+    Client[Web İstemcisi] <--> API_Container[API Konteyneri]
+    API_Container <--> DB_Container[PostgreSQL Konteyneri]
+    API_Container --> Volume[ML Model Volume]
+    DB_Container --> DB_Volume[PostgreSQL Volume]
+    
+    subgraph Docker Compose
+      API_Container
+      DB_Container
+      Volume
+      DB_Volume
+    end
 ```
 
 ## Dosya Yapısı
@@ -55,6 +78,9 @@ Solar-Backend/
 │   │   └── training.py       # Model eğitim kodları
 │   └── __init__.py
 ├── requirements.txt
+├── Dockerfile                # Docker imajı yapılandırması
+├── docker-compose.yml        # Çok konteynerli Docker yapılandırması
+├── .dockerignore             # Docker imajına dahil edilmeyecek dosyalar
 ├── main.py                   # Ana uygulama giriş noktası
 └── memory-bank/
 ```
@@ -68,6 +94,7 @@ Proje, aşağıdaki katmanlardan oluşacaktır:
 4. **Tahmin Katmanı**: Makine öğrenimi modelleri ve tahmin mekanizmaları (`app/ml/`)
 5. **Veri Katmanı**: PostgreSQL veritabanı etkileşimleri (`app/db/`)
 6. **Dış Servis Katmanı**: Dış API'lerle iletişim (Hava durumu API'si)
+7. **Container Katmanı**: Docker ile uygulama ve veritabanının containerize edilmesi
 
 ## Veri Modelleri
 Sistem aşağıdaki ana veri modellerini kullanmaktadır:
@@ -89,6 +116,18 @@ Sistem aşağıdaki ana veri modellerini kullanmaktadır:
 - **Dış API Entegrasyonu**: Open-meteo API ile hava durumu verilerinin çekilmesi
 - **CSV İçe Aktarma**: Çoklu inverter verilerini CSV dosyasından içe aktarma
 - **İki Aşamalı Model Eğitimi**: Metrik hesaplama ve final model eğitimi
+- **Docker Containerization**: Uygulamanın ve veritabanının Docker üzerinde çalıştırılması
+- **Volume Kullanımı**: Veritabanı ve model verilerinin kalıcılığının sağlanması
+- **Environment Değişkenleri**: Yapılandırma ayarlarının Docker Compose üzerinden yönetilmesi
+
+## Docker Containerization Yaklaşımı
+- **Multi-Container Yapısı**: API ve PostgreSQL için ayrı konteynerler
+- **Docker Compose Orkestrasyon**: Konteynerler arası iletişim ve yapılandırma yönetimi
+- **Volume Yönetimi**: Veritabanı verilerinin kalıcılığı için volume kullanımı
+- **Port Mapping**: API için 8000, PostgreSQL için 5432 portlarının dışa açılması
+- **Environment Değişkenleri**: Duyarlı yapılandırma bilgilerinin Docker Compose üzerinden sağlanması
+- **Health Check**: PostgreSQL konteynerinin hazır olduğundan emin olmak için health check kullanımı
+- **Restart Policy**: Konteynerlerin çökmesi durumunda otomatik yeniden başlatılması
 
 ## API Endpoint Yapısı
 API, aşağıdaki temel endpoint gruplarına sahiptir:
@@ -150,4 +189,6 @@ API, aşağıdaki temel endpoint gruplarına sahiptir:
 - Modeller birbirinden bağımsız olarak eğitilebilir ve güncellenebilir
 - API, artan talep durumunda yatay olarak ölçeklenebilir
 - Veritabanı performans optimizasyonları için indeksleme stratejileri kullanılacaktır
-- Uzun süren model eğitimleri için asenkron işleme yöntemi kullanılacaktır 
+- Uzun süren model eğitimleri için asenkron işleme yöntemi kullanılacaktır
+- Docker imajları ölçeklenebilir sistemlere (Kubernetes vb.) kolay entegre edilebilir
+- Veritabanı yükü artarsa, PostgreSQL için ayrı bir sunucu kullanılabilir 

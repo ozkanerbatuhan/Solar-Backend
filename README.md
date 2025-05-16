@@ -16,8 +16,26 @@ Bu proje, güneş enerjisi sistemindeki 8 farklı inverterin güç çıktıları
 
 - Python 3.8+
 - PostgreSQL
+- Docker ve Docker Compose (Docker ile çalıştırmak için)
 
-### Adımlar
+### Docker ile Kurulum (Önerilen)
+
+1. Projeyi klonlayın:
+   ```
+   git clone https://github.com/yourusername/solar-inverter-prediction.git
+   cd solar-inverter-prediction
+   ```
+
+2. Docker Compose ile uygulamayı başlatın:
+   ```
+   docker-compose up -d
+   ```
+
+3. API'ye http://localhost:8000 adresinden erişebilirsiniz
+   - Swagger UI: http://localhost:8000/docs
+   - ReDoc: http://localhost:8000/redoc
+
+### Manuel Kurulum
 
 1. Projeyi klonlayın:
    ```
@@ -120,6 +138,8 @@ solar-inverter-prediction/
 │   │   └── models/
 │   └── main.py
 ├── .env
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt
 └── README.md
 ```

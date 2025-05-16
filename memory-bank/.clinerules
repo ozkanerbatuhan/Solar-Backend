@@ -26,6 +26,17 @@
 - Alembic ile migrasyon yönetimi
 - Repository pattern ile veri erişimi
 - Bağlantı havuzlarının doğru kullanımı
+- PostgreSQL bağlantısı Docker Compose ile yönetilecek
+
+## Docker ve Containerization
+- Dockerfile yapılandırması için python:3.10-slim imajı kullanılacak
+- Docker Compose ile çok konteynerli yapı yönetilecek
+- PostgreSQL veritabanı ayrı bir konteynerde çalıştırılacak
+- API konteyneri ile veritabanı konteyneri arasında iletişim Docker Compose ağı üzerinden yapılacak
+- Port yapılandırması API için 8000, PostgreSQL için 5432 olarak ayarlanacak
+- Veritabanı verilerinin kalıcılığı için volume kullanılacak
+- Environment değişkenleri Docker Compose dosyasında tanımlanacak
+- Docker imajlarının optimize edilmesi gereken durumlar için multi-stage build düşünülebilir
 
 ## Hata Yönetimi
 - HTTPException ile tutarlı hata yanıtları
@@ -56,6 +67,7 @@
 - API endpoint'leri için integration testleri
 - Mock kullanımı
 - Test coverage takibi
+- Docker konteynerlerinde test yapılabilmeli
 
 ## Proje Özellikleri
 - İnverter kayıtlarının yönetimi için CRUD işlemleri
@@ -63,4 +75,4 @@
 - Güç çıktısı tahminlerinin oluşturulması ve sorgulanması
 - Model eğitimi ve yönetimi için API endpoint'leri
 - Gelecekte makine öğrenimi model entegrasyonu
-- PostgreSQL veritabanı entegrasyonu 
+- PostgreSQL veritabanı Docker konteyneri ile entegre edildi 

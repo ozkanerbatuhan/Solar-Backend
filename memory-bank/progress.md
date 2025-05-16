@@ -24,16 +24,22 @@
 - Pydantic 2.x uyumluluğu için gerekli değişiklikler yapıldı
 - Veritabanı bağlantı hatalarına karşı dayanıklılık eklendi
 - API başarıyla çalıştırıldı (veritabanı olmadan sınırlı işlevsellikle)
+- Docker ve Docker Compose yapılandırması eklendi
+- PostgreSQL veritabanı Docker konteyneri olarak yapılandırıldı
+- API servisi Docker konteyneri olarak yapılandırıldı
+- pydantic-settings paketi eklenerek bağımlılıklar güncellendi
+- PostgreSQL bağlantısı başarıyla kuruldu ve veritabanı tabloları oluşturuldu
+- README.md dosyası Docker kurulum talimatlarıyla güncellendi
 
 ## Devam Edenler
-- ML kütüphaneleri (numpy, pandas, scikit-learn) için Python 3.13 uyumluluk sorunlarının çözümü
-- PostgreSQL veritabanı kurulumu ve bağlantısı
-- Veritabanı migrasyon sisteminin kurulması
+- ML kütüphaneleri ve modellerin Docker ortamında test edilmesi
+- Test verileriyle veritabanının doldurulması
+- Sistemin uçtan uca test edilmesi
 
 ## Yeni Gereksinimler
-- PostgreSQL veritabanı için Docker container kullanımı değerlendirilebilir
-- Alternatif Python sürümü (3.11 veya 3.12) kullanımı ML kütüphaneleri uyumluluğu için düşünülebilir
-- Kapsamlı bir test planı oluşturulması gerekiyor
+- Docker imajlarının optimizasyonu
+- Docker üzerinde çalışan ML modellerinin performans değerlendirmesi
+- CI/CD pipeline entegrasyonu düşünülmeli
 
 ## Yapılacaklar
 - [x] Proje dosya yapısının kurulması
@@ -61,20 +67,23 @@
 - [x] Pydantic 2.x uyumluluğu için gerekli değişikliklerin yapılması
 - [x] Veritabanı bağlantı hatalarına karşı dayanıklılık eklenmesi
 - [x] API'nin çalıştırılması (veritabanı olmadan)
-- [ ] PostgreSQL veritabanı kurulumu ve bağlantısı
-- [ ] Veritabanı şemalarının ve tablolarının oluşturulması
-- [ ] Veritabanı migrasyon işlemlerinin yapılandırılması (Alembic)
-- [ ] ML kütüphaneleri için uyumlu Python 3.13 sürümlerinin bulunması veya alternatif çözüm
+- [x] Docker ve Docker Compose yapılandırmasının oluşturulması
+- [x] PostgreSQL veritabanı kurulumu ve bağlantısı (Docker ile)
+- [x] Veritabanı şemalarının ve tablolarının oluşturulması
 - [ ] Test verileriyle modellerin eğitilmesi ve değerlendirilmesi
+- [ ] Veritabanı migrasyon işlemlerinin yapılandırılması (Alembic)
+- [ ] ML kütüphaneleri Docker ortamında test edilmesi
 - [ ] Kapsamlı hata yönetimi ve loglama sisteminin geliştirilmesi
 - [ ] Detaylı API dokümantasyonunun tamamlanması
+- [ ] Docker imajlarının optimizasyonu
 - [ ] Performans optimizasyonu ve stres testleri
 - [ ] Güvenlik denetimi ve iyileştirmeleri
+- [ ] CI/CD pipeline entegrasyonunun düşünülmesi
 
 ## Engeller
-- PostgreSQL veritabanı henüz kurulmadı ve test edilmedi
-- Python 3.13 ile ML kütüphaneleri (numpy, pandas, scikit-learn) arasında uyumluluk sorunları var
-- Veritabanı olmadan bazı API fonksiyonları test edilemiyor
+- ML kütüphaneleri Docker ortamında daha fazla test edilmeli
+- Docker konteynerleri arası iletişim gecikmeleri değerlendirilmeli
+- ML modelleri için Docker üzerindeki kaynak yeterliliği test edilmeli
 - Open-meteo API'nin rate limit'lerine dikkat edilmeli
 - Modellerin eğitimi için yeterli veri olduğundan emin olunmalı
 
@@ -85,25 +94,22 @@
 - **Aşama 4**: Tahminleme işlevselliğinin oluşturulması ✅
 - **Aşama 5**: API endpoint'lerinin son haline getirilmesi ✅
 - **Aşama 6**: Model çakışmalarının çözülmesi ve API'nin çalıştırılması ✅
-- **Aşama 7**: PostgreSQL veritabanı kurulumu ve entegrasyonu ⏳
-- **Aşama 8**: ML kütüphaneleri uyumluluk sorunlarının çözülmesi ⏳
+- **Aşama 7**: PostgreSQL veritabanı kurulumu ve entegrasyonu (Docker ile) ✅
+- **Aşama 8**: ML kütüphaneleri Docker ortamında test edilmesi ⏳
 - **Aşama 9**: Test, optimizasyon ve dokümantasyon ⏳
+- **Aşama 10**: Docker imajlarının optimizasyonu ve CI/CD entegrasyonu ⏳
 
 ## Öncelikli Görevler
-1. PostgreSQL veritabanının kurulması (Docker ile veya yerel kurulum)
-2. Veritabanı şemalarının ve tablolarının oluşturulması
-3. ML kütüphaneleri için uyumluluk sorunlarının çözülmesi
-   - Python 3.13 ile uyumlu sürümlerin araştırılması
-   - Gerekirse Python 3.11/3.12 sürümüne geçiş
-   - Veya Docker container kullanımı
-4. Test verileri ile modellerin eğitilmesi
-5. Sistemin uçtan uca test edilmesi
+1. Test verileriyle veritabanının doldurulması
+2. ML kütüphaneleri ve modellerinin Docker ortamında test edilmesi
+3. Uçtan uca tahmin işlevselliğinin test edilmesi
+4. Docker imajlarının optimizasyonu
+5. Hata yönetimi ve loglama sisteminin geliştirilmesi
 6. Dokümantasyon ve API açıklamalarının geliştirilmesi
-7. Hata yönetimi ve loglama sisteminin geliştirilmesi
+7. Performans ve stres testlerinin yapılması
 
 ## Bilinen Sorunlar
-- PostgreSQL veritabanı kurulumu ve bağlantısı henüz yapılmadı
-- Bellek içi SQLite kullanımı veritabanı işlemleri için geçici bir çözüm, veri kalıcı değil
-- Python 3.13 ile ML kütüphaneleri arasında uyumluluk sorunları mevcut
-- Model sınıfları arasındaki çakışma çözüldü ancak bu çözüm uzun vadede karmaşıklığa neden olabilir
+- ML modelleri için Docker üzerindeki performans henüz test edilmedi
+- Docker imajlarının boyutu optimize edilmeli
+- Konteyner yeniden başlatmalarında veritabanı verilerinin kalıcılığı test edilmeli
 - Yeterli veri olmadan model eğitimi doğru sonuçlar vermeyebilir 
