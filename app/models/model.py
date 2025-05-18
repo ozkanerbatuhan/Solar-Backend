@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from typing import ClassVar, Dict, Any
 
 from app.db.database import Base
 
@@ -10,6 +11,9 @@ class Model(Base):
     """
     __tablename__ = "models"
     __table_args__ = {'extend_existing': True}
+    
+    # Pydantic uyarılarını önlemek için protected_namespaces'i boş liste olarak ayarla
+    model_config: ClassVar[Dict[str, Any]] = {"protected_namespaces": ()}
 
     id = Column(Integer, primary_key=True, index=True)
     inverter_id = Column(Integer, ForeignKey("inverters.id"), nullable=False)
