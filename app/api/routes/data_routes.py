@@ -7,6 +7,7 @@ from datetime import datetime, date, timedelta
 
 from app.db.database import get_db
 from app.models.inverter import Inverter, InverterData
+from app.models.weather import WeatherData
 from app.schemas.inverter import InverterData as InverterDataSchema
 from app.schemas.weather import CSVUploadResponse
 from app.schemas.data import DataUploadResponse, DataStatistics
@@ -76,6 +77,142 @@ async def upload_csv_data(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"CSV yükleme hatası: {str(e)}"
+        )
+
+@router.post("/upload-weather-inverter-data", response_model=DataUploadResponse)
+async def upload_weather_inverter_data(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """
+    CSV dosyasından hava durumu ve inverter verilerini yükler.
+    Bu endpoint sadece verileri yükler, model eğitimi yapmaz.
+    
+    CSV formatı:
+    time,temperature_2m,shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance,
+    global_tilted_irradiance,terrestrial_radiation,relative_humidity_2m,wind_speed_10m,visibility,
+    INV/1/DayEnergy,INV/2/DayEnergy,INV/3/DayEnergy,INV/4/DayEnergy,INV/5/DayEnergy,INV/6/DayEnergy,
+    INV/7/DayEnergy,INV/8/DayEnergy
+    
+    Args:
+        file: CSV dosyası
+        db: Veritabanı oturumu
+    """
+    try:
+        # CSV içeriğini oku
+        contents = await file.read()
+        csv_file = io.StringIO(contents.decode('utf-8'))
+        
+        # CSV dosyasını pandas ile oku
+        df = pd.read_csv(csv_file)
+        
+        # Tarih sütununun datetime formatına dönüştürülmesi
+        df['time'] = pd.to_datetime(df['time'])
+        
+        # Kaç satır işlendiğini takip etmek için sayaç
+        processed_rows = 0
+        weather_rows = 0
+        inverter_rows = 0
+        
+        # Mevcut inverterleri kontrol et, yoksa oluştur
+        inverter_ids = list(range(1, 9))  # 1'den 8'e kadar inverter ID'leri
+        for inv_id in inverter_ids:
+            inverter = db.query(Inverter).filter(Inverter.id == inv_id).first()
+            if not inverter:
+                # Yeni inverter oluştur
+                inverter = Inverter(
+                    id=inv_id,
+                    name=f"Inverter-{inv_id}",
+                    capacity=10.0,  # Varsayılan kapasite
+                    location=f"Location-{inv_id}",  # Varsayılan konum
+                    is_active=True
+                )
+                db.add(inverter)
+        
+        # İnverterleri kaydetmek için commit
+        db.commit()
+        
+        # DataFrame üzerinde iterate ederek verileri veritabanına kaydet
+        for _, row in df.iterrows():
+            # Hava durumu verisini ekle
+            timestamp = row['time']
+            
+            # Mevcut hava durumu verisini kontrol et
+            existing_weather = db.query(WeatherData).filter(
+                WeatherData.timestamp == timestamp
+            ).first()
+            
+            if not existing_weather:
+                weather_data = WeatherData(
+                    timestamp=timestamp,
+                    temperature=row.get('temperature_2m'),
+                    shortwave_radiation=row.get('shortwave_radiation'),
+                    direct_radiation=row.get('direct_radiation'),
+                    diffuse_radiation=row.get('diffuse_radiation'),
+                    direct_normal_irradiance=row.get('direct_normal_irradiance'),
+                    global_tilted_irradiance=row.get('global_tilted_irradiance'),
+                    terrestrial_radiation=row.get('terrestrial_radiation'),
+                    relative_humidity=row.get('relative_humidity_2m'),
+                    wind_speed=row.get('wind_speed_10m'),
+                    visibility=row.get('visibility'),
+                    is_forecast=0  # Gerçek veri
+                )
+                db.add(weather_data)
+                weather_rows += 1
+            
+            # İnverter verilerini ekle
+            for inv_id in range(1, 9):
+                inverter_column = f"INV/{inv_id}/DayEnergy"
+                
+                # İnverter verisi varsa ekle
+                if inverter_column in row and not pd.isna(row[inverter_column]):
+                    # Mevcut inverter verisini kontrol et
+                    existing_inverter_data = db.query(InverterData).filter(
+                        InverterData.inverter_id == inv_id,
+                        InverterData.timestamp == timestamp
+                    ).first()
+                    
+                    if not existing_inverter_data:
+                        inverter_data = InverterData(
+                            inverter_id=inv_id,
+                            timestamp=timestamp,
+                            power_output=row[inverter_column],
+                            temperature=row.get('temperature_2m'),
+                            irradiance=row.get('direct_normal_irradiance')
+                        )
+                        db.add(inverter_data)
+                        inverter_rows += 1
+            
+            processed_rows += 1
+            
+            # Her 100 satırda bir commit yap (bellek optimizasyonu için)
+            if processed_rows % 100 == 0:
+                db.commit()
+        
+        # Kalan işlemler için son commit
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Toplam {processed_rows} satır işlendi. {weather_rows} hava durumu ve {inverter_rows} inverter verisi eklendi.",
+            "processed_rows": processed_rows,
+            "statistics": {
+                "total_rows": processed_rows,
+                "weather_rows": weather_rows,
+                "inverter_rows": inverter_rows,
+                "date_range": {
+                    "min_date": df['time'].min().isoformat() if not df.empty else None,
+                    "max_date": df['time'].max().isoformat() if not df.empty else None
+                }
+            }
+        }
+    
+    except Exception as e:
+        # Hata durumunda rollback
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Veri yükleme hatası: {str(e)}"
         )
 
 @router.get("/statistics", response_model=DataStatistics)
