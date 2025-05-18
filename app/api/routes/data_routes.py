@@ -457,63 +457,71 @@ async def get_data_statistics(
         inverter_id: İnverter ID'si
         db: Veritabanı oturumu
     """
-    query = db.query(InverterData)
-    
-    # Filtreleri uygula
-    if start_date:
-        query = query.filter(InverterData.timestamp >= start_date)
-    if end_date:
-        # Son tarihin sonuna kadar verileri almak için
-        end_date = datetime.combine(end_date, datetime.max.time())
-        query = query.filter(InverterData.timestamp <= end_date)
-    if inverter_id:
-        query = query.filter(InverterData.inverter_id == inverter_id)
-    
-    # Toplam kayıt sayısı
-    total_count = query.count()
-    
-    if total_count == 0:
+    try:
+        query = db.query(InverterData)
+        
+        # Filtreleri uygula
+        if start_date:
+            query = query.filter(InverterData.timestamp >= start_date)
+        if end_date:
+            # Son tarihin sonuna kadar verileri almak için
+            end_date = datetime.combine(end_date, datetime.max.time())
+            query = query.filter(InverterData.timestamp <= end_date)
+        if inverter_id:
+            query = query.filter(InverterData.inverter_id == inverter_id)
+        
+        # Toplam kayıt sayısı
+        total_count = query.count()
+        
+        if total_count == 0:
+            return {
+                "total_records": 0,
+                "date_range": None,
+                "inverter_count": 0,
+                "inverter_ids": []
+            }
+        
+        # Tarih aralığı
+        date_range = db.query(
+            func.min(InverterData.timestamp).label("min_date"),
+            func.max(InverterData.timestamp).label("max_date")
+        ).filter(query.whereclause).first()
+        
+        # İnverter sayısı ve ID'leri
+        inverter_data = db.query(
+            InverterData.inverter_id
+        ).filter(query.whereclause).distinct().all()
+        
+        inverter_ids = [item.inverter_id for item in inverter_data]
+        
+        # Tarih aralığı için None kontrolü
+        date_range_info = None
+        if date_range and date_range.min_date is not None and date_range.max_date is not None:
+            date_range_info = {
+                "min_date": date_range.min_date,
+                "max_date": date_range.max_date,
+                "days": (date_range.max_date.date() - date_range.min_date.date()).days + 1
+            }
+        else:
+            date_range_info = {
+                "min_date": None,
+                "max_date": None,
+                "days": 0
+            }
+        
+        return {
+            "total_records": total_count,
+            "date_range": date_range_info,
+            "inverter_count": len(inverter_ids),
+            "inverter_ids": inverter_ids
+        }
+    except Exception as e:
         return {
             "total_records": 0,
             "date_range": None,
             "inverter_count": 0,
             "inverter_ids": []
         }
-    
-    # Tarih aralığı
-    date_range = db.query(
-        func.min(InverterData.timestamp).label("min_date"),
-        func.max(InverterData.timestamp).label("max_date")
-    ).filter(query.whereclause).first()
-    
-    # İnverter sayısı ve ID'leri
-    inverter_data = db.query(
-        InverterData.inverter_id
-    ).filter(query.whereclause).distinct().all()
-    
-    inverter_ids = [item.inverter_id for item in inverter_data]
-    
-    # Tarih aralığı için None kontrolü
-    date_range_info = None
-    if date_range and date_range.min_date is not None and date_range.max_date is not None:
-        date_range_info = {
-            "min_date": date_range.min_date,
-            "max_date": date_range.max_date,
-            "days": (date_range.max_date.date() - date_range.min_date.date()).days + 1
-        }
-    else:
-        date_range_info = {
-            "min_date": None,
-            "max_date": None,
-            "days": 0
-        }
-    
-    return {
-        "total_records": total_count,
-        "date_range": date_range_info,
-        "inverter_count": len(inverter_ids),
-        "inverter_ids": inverter_ids
-    }
 
 @router.get("/detailed-statistics")
 async def get_detailed_statistics(
@@ -529,200 +537,249 @@ async def get_detailed_statistics(
         end_date: Bitiş tarihi (isteğe bağlı)
         db: Veritabanı oturumu
     """
-    # Tarih aralığı filtrelerini oluştur
-    start_filter = None
-    end_filter = None
-    
-    if start_date:
-        start_filter = datetime.combine(start_date, datetime.min.time())
-    if end_date:
-        end_filter = datetime.combine(end_date, datetime.max.time())
-    
-    # WeatherData istatistikleri
-    weather_query = db.query(WeatherData)
-    if start_filter:
-        weather_query = weather_query.filter(WeatherData.timestamp >= start_filter)
-    if end_filter:
-        weather_query = weather_query.filter(WeatherData.timestamp <= end_filter)
-    
-    weather_count = weather_query.count()
-    
-    # Hava durumu tarih aralığı
-    weather_date_range = None
-    if weather_count > 0:
-        weather_range = db.query(
-            func.min(WeatherData.timestamp).label("min_date"),
-            func.max(WeatherData.timestamp).label("max_date")
-        ).filter(weather_query.whereclause).first()
+    try:
+        # Tarih aralığı filtrelerini oluştur
+        start_filter = None
+        end_filter = None
         
-        if weather_range and weather_range.min_date is not None and weather_range.max_date is not None:
-            weather_date_range = {
-                "min_date": weather_range.min_date,
-                "max_date": weather_range.max_date,
-                "days": (weather_range.max_date.date() - weather_range.min_date.date()).days + 1
-            }
-        else:
-            weather_date_range = {
-                "min_date": None,
-                "max_date": None,
-                "days": 0
-            }
-    
-    # İnverter verileri istatistikleri
-    inverter_query = db.query(InverterData)
-    if start_filter:
-        inverter_query = inverter_query.filter(InverterData.timestamp >= start_filter)
-    if end_filter:
-        inverter_query = inverter_query.filter(InverterData.timestamp <= end_filter)
-    
-    inverter_count = inverter_query.count()
-    
-    # İnverter tarih aralığı
-    inverter_date_range = None
-    if inverter_count > 0:
-        inverter_range = db.query(
-            func.min(InverterData.timestamp).label("min_date"),
-            func.max(InverterData.timestamp).label("max_date")
-        ).filter(inverter_query.whereclause).first()
+        if start_date:
+            start_filter = datetime.combine(start_date, datetime.min.time())
+        if end_date:
+            end_filter = datetime.combine(end_date, datetime.max.time())
         
-        if inverter_range and inverter_range.min_date is not None and inverter_range.max_date is not None:
-            inverter_date_range = {
-                "min_date": inverter_range.min_date,
-                "max_date": inverter_range.max_date,
-                "days": (inverter_range.max_date.date() - inverter_range.min_date.date()).days + 1
-            }
-        else:
-            inverter_date_range = {
-                "min_date": None,
-                "max_date": None,
-                "days": 0
-            }
-    
-    # İnverter bazında istatistikler
-    inverter_stats = {}
-    if inverter_count > 0:
-        # Tüm inverter ID'lerini al
-        inverter_ids = db.query(InverterData.inverter_id).distinct().all()
-        inverter_ids = [item.inverter_id for item in inverter_ids]
+        # WeatherData istatistikleri
+        weather_query = db.query(WeatherData)
+        if start_filter:
+            weather_query = weather_query.filter(WeatherData.timestamp >= start_filter)
+        if end_filter:
+            weather_query = weather_query.filter(WeatherData.timestamp <= end_filter)
         
-        for inv_id in inverter_ids:
-            # Bu inverter için verileri filtrele
-            inv_query = inverter_query.filter(InverterData.inverter_id == inv_id)
-            inv_count = inv_query.count()
-            
-            if inv_count > 0:
-                # Tarih aralığı
-                inv_range = db.query(
-                    func.min(InverterData.timestamp).label("min_date"),
-                    func.max(InverterData.timestamp).label("max_date")
-                ).filter(inv_query.whereclause).first()
+        weather_count = weather_query.count()
+        
+        # Hava durumu tarih aralığı
+        weather_date_range = None
+        if weather_count > 0:
+            try:
+                # Daha güvenli bir yaklaşım - doğrudan SQL ile sorgu yapalım
+                min_max_date = db.execute(
+                    "SELECT MIN(timestamp) as min_date, MAX(timestamp) as max_date FROM weather_data"
+                ).fetchone()
                 
-                # Güç çıktısı istatistikleri
-                power_stats = db.query(
-                    func.avg(InverterData.power_output).label("avg_power"),
-                    func.min(InverterData.power_output).label("min_power"),
-                    func.max(InverterData.power_output).label("max_power")
-                ).filter(inv_query.whereclause).first()
-                
-                # Kayıp veri analizi
-                # Tarih aralığındaki tüm saatlerin sayısı
-                total_hours = 0
-                date_range_info = {}
-
-                if inv_range and inv_range.min_date is not None and inv_range.max_date is not None:
-                    total_hours = (inv_range.max_date - inv_range.min_date).total_seconds() / 3600
-                    total_hours = int(total_hours) + 1
-                    date_range_info = {
-                        "min_date": inv_range.min_date,
-                        "max_date": inv_range.max_date,
-                        "days": (inv_range.max_date.date() - inv_range.min_date.date()).days + 1
+                if min_max_date and min_max_date[0] and min_max_date[1]:
+                    min_date = min_max_date[0]
+                    max_date = min_max_date[1]
+                    weather_date_range = {
+                        "min_date": min_date,
+                        "max_date": max_date,
+                        "days": (max_date.date() - min_date.date()).days + 1
                     }
                 else:
-                    date_range_info = {
+                    weather_date_range = {
                         "min_date": None,
                         "max_date": None,
                         "days": 0
                     }
+            except Exception as e:
+                print(f"Hava durumu tarih aralığı hesaplanırken hata: {e}")
+                weather_date_range = {
+                    "min_date": None,
+                    "max_date": None,
+                    "days": 0
+                }
+        
+        # İnverter verileri istatistikleri
+        inverter_query = db.query(InverterData)
+        if start_filter:
+            inverter_query = inverter_query.filter(InverterData.timestamp >= start_filter)
+        if end_filter:
+            inverter_query = inverter_query.filter(InverterData.timestamp <= end_filter)
+        
+        inverter_count = inverter_query.count()
+        
+        # İnverter tarih aralığı
+        inverter_date_range = None
+        if inverter_count > 0:
+            inverter_range = db.query(
+                func.min(InverterData.timestamp).label("min_date"),
+                func.max(InverterData.timestamp).label("max_date")
+            ).filter(inverter_query.whereclause).first()
+            
+            if inverter_range and inverter_range.min_date is not None and inverter_range.max_date is not None:
+                inverter_date_range = {
+                    "min_date": inverter_range.min_date,
+                    "max_date": inverter_range.max_date,
+                    "days": (inverter_range.max_date.date() - inverter_range.min_date.date()).days + 1
+                }
+            else:
+                inverter_date_range = {
+                    "min_date": None,
+                    "max_date": None,
+                    "days": 0
+                }
+        
+        # İnverter bazında istatistikler
+        inverter_stats = {}
+        if inverter_count > 0:
+            # Tüm inverter ID'lerini al
+            inverter_ids = db.query(InverterData.inverter_id).distinct().all()
+            inverter_ids = [item.inverter_id for item in inverter_ids]
+            
+            for inv_id in inverter_ids:
+                # Bu inverter için verileri filtrele
+                inv_query = inverter_query.filter(InverterData.inverter_id == inv_id)
+                inv_count = inv_query.count()
                 
-                missing_hours = total_hours - inv_count
+                if inv_count > 0:
+                    # Tarih aralığı
+                    inv_range = db.query(
+                        func.min(InverterData.timestamp).label("min_date"),
+                        func.max(InverterData.timestamp).label("max_date")
+                    ).filter(inv_query.whereclause).first()
+                    
+                    # Güç çıktısı istatistikleri
+                    power_stats = db.query(
+                        func.avg(InverterData.power_output).label("avg_power"),
+                        func.min(InverterData.power_output).label("min_power"),
+                        func.max(InverterData.power_output).label("max_power")
+                    ).filter(inv_query.whereclause).first()
+                    
+                    # Kayıp veri analizi
+                    # Tarih aralığındaki tüm saatlerin sayısı
+                    total_hours = 0
+                    date_range_info = {}
+
+                    if inv_range and inv_range.min_date is not None and inv_range.max_date is not None:
+                        total_hours = (inv_range.max_date - inv_range.min_date).total_seconds() / 3600
+                        total_hours = int(total_hours) + 1
+                        date_range_info = {
+                            "min_date": inv_range.min_date,
+                            "max_date": inv_range.max_date,
+                            "days": (inv_range.max_date.date() - inv_range.min_date.date()).days + 1
+                        }
+                    else:
+                        date_range_info = {
+                            "min_date": None,
+                            "max_date": None,
+                            "days": 0
+                        }
+                    
+                    missing_hours = total_hours - inv_count
+                    
+                    inverter_stats[f"inverter_{inv_id}"] = {
+                        "total_records": inv_count,
+                        "date_range": date_range_info,
+                        "power_output": {
+                            "avg": float(power_stats.avg_power) if power_stats and power_stats.avg_power else 0,
+                            "min": float(power_stats.min_power) if power_stats and power_stats.min_power else 0,
+                            "max": float(power_stats.max_power) if power_stats and power_stats.max_power else 0
+                        },
+                        "data_completeness": {
+                            "total_hours": total_hours,
+                            "recorded_hours": inv_count,
+                            "missing_hours": missing_hours,
+                            "completeness_percentage": round((inv_count / total_hours) * 100, 2) if total_hours > 0 else 0
+                        }
+                    }
+        
+        # Hava durumu veri analizi
+        weather_stats = {}
+        if weather_count > 0:
+            try:
+                # Sıcaklık istatistikleri
+                temp_stats = db.query(
+                    func.avg(WeatherData.temperature).label("avg_temp"),
+                    func.min(WeatherData.temperature).label("min_temp"),
+                    func.max(WeatherData.temperature).label("max_temp")
+                ).filter(weather_query.whereclause).first()
                 
-                inverter_stats[f"inverter_{inv_id}"] = {
-                    "total_records": inv_count,
-                    "date_range": date_range_info,
-                    "power_output": {
-                        "avg": float(power_stats.avg_power) if power_stats and power_stats.avg_power else 0,
-                        "min": float(power_stats.min_power) if power_stats and power_stats.min_power else 0,
-                        "max": float(power_stats.max_power) if power_stats and power_stats.max_power else 0
+                # Radyasyon istatistikleri
+                radiation_stats = db.query(
+                    func.avg(WeatherData.direct_normal_irradiance).label("avg_dni"),
+                    func.max(WeatherData.direct_normal_irradiance).label("max_dni")
+                ).filter(weather_query.whereclause).first()
+                
+                # Tarih aralığındaki tüm saatlerin sayısı
+                total_hours = 0
+                missing_hours = 0
+                
+                # Yukarda elde ettiğimiz min_date ve max_date değerlerini kullanarak hesaplama yapalım
+                if weather_date_range and weather_date_range["min_date"] and weather_date_range["max_date"]:
+                    min_date = weather_date_range["min_date"]
+                    max_date = weather_date_range["max_date"]
+                    
+                    total_hours = (max_date - min_date).total_seconds() / 3600
+                    total_hours = int(total_hours) + 1
+                    missing_hours = total_hours - weather_count
+                
+                weather_stats = {
+                    "temperature": {
+                        "avg": float(temp_stats.avg_temp) if temp_stats and temp_stats.avg_temp else 0,
+                        "min": float(temp_stats.min_temp) if temp_stats and temp_stats.min_temp else 0,
+                        "max": float(temp_stats.max_temp) if temp_stats and temp_stats.max_temp else 0
+                    },
+                    "radiation": {
+                        "avg_dni": float(radiation_stats.avg_dni) if radiation_stats and radiation_stats.avg_dni else 0,
+                        "max_dni": float(radiation_stats.max_dni) if radiation_stats and radiation_stats.max_dni else 0
                     },
                     "data_completeness": {
                         "total_hours": total_hours,
-                        "recorded_hours": inv_count,
+                        "recorded_hours": weather_count,
                         "missing_hours": missing_hours,
-                        "completeness_percentage": round((inv_count / total_hours) * 100, 2) if total_hours > 0 else 0
+                        "completeness_percentage": round((weather_count / total_hours) * 100, 2) if total_hours > 0 else 0
                     }
                 }
-    
-    # Hava durumu veri analizi
-    weather_stats = {}
-    if weather_count > 0:
-        # Sıcaklık istatistikleri
-        temp_stats = db.query(
-            func.avg(WeatherData.temperature).label("avg_temp"),
-            func.min(WeatherData.temperature).label("min_temp"),
-            func.max(WeatherData.temperature).label("max_temp")
-        ).filter(weather_query.whereclause).first()
+            except Exception as e:
+                print(f"Hava durumu istatistikleri hesaplanırken hata: {e}")
+                weather_stats = {
+                    "temperature": {"avg": 0, "min": 0, "max": 0},
+                    "radiation": {"avg_dni": 0, "max_dni": 0},
+                    "data_completeness": {
+                        "total_hours": 0, 
+                        "recorded_hours": weather_count,
+                        "missing_hours": 0,
+                        "completeness_percentage": 0
+                    }
+                }
         
-        # Radyasyon istatistikleri
-        radiation_stats = db.query(
-            func.avg(WeatherData.direct_normal_irradiance).label("avg_dni"),
-            func.max(WeatherData.direct_normal_irradiance).label("max_dni")
-        ).filter(weather_query.whereclause).first()
-        
-        # Tarih aralığındaki tüm saatlerin sayısı
-        total_hours = 0
-        missing_hours = 0
-        
-        if weather_range and weather_range.min_date is not None and weather_range.max_date is not None:
-            total_hours = (weather_range.max_date - weather_range.min_date).total_seconds() / 3600
-            total_hours = int(total_hours) + 1
-            missing_hours = total_hours - weather_count
-        
-        weather_stats = {
-            "temperature": {
-                "avg": float(temp_stats.avg_temp) if temp_stats and temp_stats.avg_temp else 0,
-                "min": float(temp_stats.min_temp) if temp_stats and temp_stats.min_temp else 0,
-                "max": float(temp_stats.max_temp) if temp_stats and temp_stats.max_temp else 0
+        # Sonuç
+        return {
+            "weather_data": {
+                "total_records": weather_count,
+                "date_range": weather_date_range,
+                "statistics": weather_stats
             },
-            "radiation": {
-                "avg_dni": float(radiation_stats.avg_dni) if radiation_stats and radiation_stats.avg_dni else 0,
-                "max_dni": float(radiation_stats.max_dni) if radiation_stats and radiation_stats.max_dni else 0
+            "inverter_data": {
+                "total_records": inverter_count,
+                "date_range": inverter_date_range,
+                "inverter_count": len(inverter_stats),
+                "inverter_stats": inverter_stats
             },
-            "data_completeness": {
-                "total_hours": total_hours,
-                "recorded_hours": weather_count,
-                "missing_hours": missing_hours,
-                "completeness_percentage": round((weather_count / total_hours) * 100, 2) if total_hours > 0 else 0
+            "query_parameters": {
+                "start_date": start_date.isoformat() if start_date else None,
+                "end_date": end_date.isoformat() if end_date else None
             }
         }
-    
-    # Sonuç
-    return {
-        "weather_data": {
-            "total_records": weather_count,
-            "date_range": weather_date_range,
-            "statistics": weather_stats
-        },
-        "inverter_data": {
-            "total_records": inverter_count,
-            "date_range": inverter_date_range,
-            "inverter_count": len(inverter_stats),
-            "inverter_stats": inverter_stats
-        },
-        "query_parameters": {
-            "start_date": start_date.isoformat() if start_date else None,
-            "end_date": end_date.isoformat() if end_date else None
+    except Exception as e:
+        print(f"Detaylı istatistikler hesaplanırken hata: {str(e)}")
+        return {
+            "error": True,
+            "message": f"İstatistik hesaplanırken hata oluştu: {str(e)}",
+            "weather_data": {
+                "total_records": 0,
+                "date_range": None,
+                "statistics": {}
+            },
+            "inverter_data": {
+                "total_records": 0,
+                "date_range": None,
+                "inverter_count": 0,
+                "inverter_stats": {}
+            },
+            "query_parameters": {
+                "start_date": start_date.isoformat() if start_date else None,
+                "end_date": end_date.isoformat() if end_date else None
+            }
         }
-    }
 
 @router.post("/fetch-weather-data")
 async def fetch_weather_for_inverter_data(
@@ -736,13 +793,19 @@ async def fetch_weather_for_inverter_data(
     Args:
         db: Veritabanı oturumu
     """
-    # Arka planda hava durumu verilerini çek
-    background_tasks.add_task(fetch_weather_data_for_dates, db)
-    
-    return {
-        "success": True,
-        "message": "Hava durumu verileri arka planda çekiliyor"
-    }
+    try:
+        # Arka planda hava durumu verilerini çek
+        background_tasks.add_task(fetch_weather_data_for_dates, db)
+        
+        return {
+            "success": True,
+            "message": "Hava durumu verileri arka planda çekiliyor"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Hava durumu verileri çekilirken hata oluştu: {str(e)}"
+        }
 
 @router.get("/inverter-data/summary", response_model=dict)
 async def get_inverter_data_summary(
@@ -753,34 +816,43 @@ async def get_inverter_data_summary(
     """
     İnverter verilerinin özet istatistiklerini döndürür (tarih aralığına göre).
     """
-    query = db.query(InverterData)
-    
-    if start_date:
-        query = query.filter(InverterData.timestamp >= start_date)
-    if end_date:
-        query = query.filter(InverterData.timestamp <= end_date)
-    
-    data_count = query.count()
-    
-    if data_count == 0:
+    try:
+        query = db.query(InverterData)
+        
+        if start_date:
+            query = query.filter(InverterData.timestamp >= start_date)
+        if end_date:
+            query = query.filter(InverterData.timestamp <= end_date)
+        
+        data_count = query.count()
+        
+        if data_count == 0:
+            return {
+                "total_records": 0,
+                "date_range": {"start": None, "end": None},
+                "inverter_count": 0
+            }
+            
+        # Tarih aralığı
+        date_range = db.query(
+            func.min(InverterData.timestamp),
+            func.max(InverterData.timestamp)
+        ).first()
+        
+        # İnverter sayısı
+        inverter_count = db.query(Inverter).count()
+        
+        # Özet istatistikler
         return {
+            "total_records": data_count,
+            "date_range": {"start": date_range[0], "end": date_range[1]},
+            "inverter_count": inverter_count
+        }
+    except Exception as e:
+        return {
+            "error": True,
+            "message": f"İnverter veri özeti alınırken hata oluştu: {str(e)}",
             "total_records": 0,
             "date_range": {"start": None, "end": None},
             "inverter_count": 0
-        }
-        
-    # Tarih aralığı
-    date_range = db.query(
-        db.func.min(InverterData.timestamp),
-        db.func.max(InverterData.timestamp)
-    ).first()
-    
-    # İnverter sayısı
-    inverter_count = db.query(Inverter).count()
-    
-    # Özet istatistikler
-    return {
-        "total_records": data_count,
-        "date_range": {"start": date_range[0], "end": date_range[1]},
-        "inverter_count": inverter_count
-    } 
+        } 

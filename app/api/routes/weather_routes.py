@@ -75,19 +75,25 @@ async def get_weather_data(
     Belirli bir tarih aralığındaki hava durumu verilerini listeler.
     Tarih belirtilmezse en son veriler döndürülür.
     """
-    query = db.query(WeatherData)
-    
-    if start_date:
-        query = query.filter(WeatherData.timestamp >= start_date)
-    if end_date:
-        # Son tarihin sonuna kadar verileri almak için
-        end_date = datetime.combine(end_date, datetime.max.time())
-        query = query.filter(WeatherData.timestamp <= end_date)
-    
-    query = query.order_by(WeatherData.timestamp.desc())
-    weather_data = query.offset(offset).limit(limit).all()
-    
-    return weather_data
+    try:
+        query = db.query(WeatherData)
+        
+        if start_date:
+            query = query.filter(WeatherData.timestamp >= start_date)
+        if end_date:
+            # Son tarihin sonuna kadar verileri almak için
+            end_date = datetime.combine(end_date, datetime.max.time())
+            query = query.filter(WeatherData.timestamp <= end_date)
+        
+        query = query.order_by(WeatherData.timestamp.desc())
+        weather_data = query.offset(offset).limit(limit).all()
+        
+        return weather_data
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Hava durumu verileri listelenirken hata oluştu: {str(e)}"
+        )
 
 @router.get("/forecast", response_model=List[WeatherForecastSchema])
 async def get_weather_forecast(
@@ -97,24 +103,30 @@ async def get_weather_forecast(
     """
     Gelecek zaman dilimi için en güncel hava durumu tahminlerini listeler.
     """
-    now = datetime.utcnow()
-    end_date = now + timedelta(days=days_ahead)
-    
-    # En güncel tahminleri almak için, her zaman dilimi için son tahmini seç
-    subquery = db.query(
-        WeatherForecast.forecast_timestamp,
-        db.func.max(WeatherForecast.created_at).label("latest_created")
-    ).group_by(WeatherForecast.forecast_timestamp).subquery()
-    
-    forecasts = db.query(WeatherForecast).join(
-        subquery,
-        db.and_(
-            WeatherForecast.forecast_timestamp == subquery.c.forecast_timestamp,
-            WeatherForecast.created_at == subquery.c.latest_created
-        )
-    ).filter(
-        WeatherForecast.forecast_timestamp >= now,
-        WeatherForecast.forecast_timestamp <= end_date
-    ).order_by(WeatherForecast.forecast_timestamp).all()
-    
-    return forecasts 
+    try:
+        now = datetime.utcnow()
+        end_date = now + timedelta(days=days_ahead)
+        
+        # En güncel tahminleri almak için, her zaman dilimi için son tahmini seç
+        subquery = db.query(
+            WeatherForecast.forecast_timestamp,
+            db.func.max(WeatherForecast.created_at).label("latest_created")
+        ).group_by(WeatherForecast.forecast_timestamp).subquery()
+        
+        forecasts = db.query(WeatherForecast).join(
+            subquery,
+            db.and_(
+                WeatherForecast.forecast_timestamp == subquery.c.forecast_timestamp,
+                WeatherForecast.created_at == subquery.c.latest_created
+            )
+        ).filter(
+            WeatherForecast.forecast_timestamp >= now,
+            WeatherForecast.forecast_timestamp <= end_date
+        ).order_by(WeatherForecast.forecast_timestamp).all()
+        
+        return forecasts
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Hava durumu tahminleri listelenirken hata oluştu: {str(e)}"
+        ) 

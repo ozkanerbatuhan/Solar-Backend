@@ -15,16 +15,25 @@ router = APIRouter()
 @router.post("/models/", response_model=ModelInfo, status_code=status.HTTP_201_CREATED)
 async def create_model(model: ModelInfo, db: Session = Depends(get_db)):
     """Yeni bir model kaydı oluşturur."""
-    # Inverter'ın varlığını kontrol et
-    inverter = db.query(Inverter).filter(Inverter.id == model.inverter_id).first()
-    if inverter is None:
-        raise HTTPException(status_code=404, detail="Inverter bulunamadı")
-    
-    db_model = Model(**model.model_dump())
-    db.add(db_model)
-    db.commit()
-    db.refresh(db_model)
-    return db_model
+    try:
+        # Inverter'ın varlığını kontrol et
+        inverter = db.query(Inverter).filter(Inverter.id == model.inverter_id).first()
+        if inverter is None:
+            raise HTTPException(status_code=404, detail="Inverter bulunamadı")
+        
+        db_model = Model(**model.model_dump())
+        db.add(db_model)
+        db.commit()
+        db.refresh(db_model)
+        return db_model
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model oluşturulurken hata oluştu: {str(e)}"
+        )
 
 @router.get("/models", response_model=List[ModelInfo])
 def list_models(
@@ -44,24 +53,38 @@ def list_models(
         limit: Alınacak maksimum kayıt sayısı
         db: Veritabanı oturumu
     """
-    query = db.query(Model)
-    
-    if inverter_id is not None:
-        query = query.filter(Model.inverter_id == inverter_id)
-    
-    if active_only:
-        query = query.filter(Model.is_active == True)
-    
-    models = query.order_by(Model.created_at.desc()).offset(skip).limit(limit).all()
-    return models
+    try:
+        query = db.query(Model)
+        
+        if inverter_id is not None:
+            query = query.filter(Model.inverter_id == inverter_id)
+        
+        if active_only:
+            query = query.filter(Model.is_active == True)
+        
+        models = query.order_by(Model.created_at.desc()).offset(skip).limit(limit).all()
+        return models
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Modeller listelenirken hata oluştu: {str(e)}"
+        )
 
 @router.get("/models/{model_id}", response_model=ModelInfo)
 def read_model(model_id: int, db: Session = Depends(get_db)):
     """Belirli bir modeli ID'sine göre getirir."""
-    model = db.query(Model).filter(Model.id == model_id).first()
-    if model is None:
-        raise HTTPException(status_code=404, detail="Model bulunamadı")
-    return model
+    try:
+        model = db.query(Model).filter(Model.id == model_id).first()
+        if model is None:
+            raise HTTPException(status_code=404, detail="Model bulunamadı")
+        return model
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model bilgisi alınırken hata oluştu: {str(e)}"
+        )
 
 @router.post("/train/{inverter_id}", response_model=ModelTrainingResponse)
 async def train_inverter_model(
@@ -155,13 +178,21 @@ async def get_inverter_model_metrics(
         inverter_id: Metrikleri alınacak inverter ID'si
         db: Veritabanı oturumu
     """
-    # Inverter'ın varlığını kontrol et
-    inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
-    if inverter is None:
-        raise HTTPException(status_code=404, detail="Inverter bulunamadı")
-    
-    metrics = await get_model_metrics(inverter_id, db)
-    return metrics
+    try:
+        # Inverter'ın varlığını kontrol et
+        inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
+        if inverter is None:
+            raise HTTPException(status_code=404, detail="Inverter bulunamadı")
+        
+        metrics = await get_model_metrics(inverter_id, db)
+        return metrics
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model metrikleri alınırken hata oluştu: {str(e)}"
+        )
 
 @router.get("/metrics", response_model=Dict[str, Any])
 async def get_all_model_metrics_endpoint(
@@ -173,8 +204,14 @@ async def get_all_model_metrics_endpoint(
     Args:
         db: Veritabanı oturumu
     """
-    metrics = await get_all_model_metrics(db)
-    return metrics
+    try:
+        metrics = await get_all_model_metrics(db)
+        return metrics
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Tüm model metrikleri alınırken hata oluştu: {str(e)}"
+        )
 
 @router.get("/predict/{inverter_id}")
 async def predict_inverter_output(
@@ -198,15 +235,16 @@ async def predict_inverter_output(
         return {
             "inverter_id": inverter_id,
             "timestamp": timestamp,
-            "prediction_timestamp": prediction.prediction_timestamp,
             "predicted_power_output": prediction.predicted_power_output,
             "confidence": prediction.confidence,
             "model_version": prediction.model_version
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Tahmin sırasında bir hata oluştu: {str(e)}"
+            detail=f"Tahmin yapılırken hata oluştu: {str(e)}"
         )
 
 @router.post("/predict-bulk")
@@ -218,7 +256,7 @@ async def predict_bulk_inverter_output(
     db: Session = Depends(get_db)
 ):
     """
-    Birden fazla inverter için belirli bir zaman aralığında tahminler yapar.
+    Belirtilen inverterler için belirli bir zaman aralığında toplu tahmin yapar.
     
     Args:
         inverter_ids: Tahmin yapılacak inverter ID'leri
@@ -228,50 +266,32 @@ async def predict_bulk_inverter_output(
         db: Veritabanı oturumu
     """
     try:
-        # Inverter'ların varlığını kontrol et
-        for inverter_id in inverter_ids:
-            inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
-            if inverter is None:
-                raise HTTPException(status_code=404, detail=f"Inverter {inverter_id} bulunamadı")
-        
-        # Zaman aralığını kontrol et
-        if end_time <= start_time:
+        # Zamanların uygun olduğunu kontrol et
+        if start_time >= end_time:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Bitiş zamanı başlangıç zamanından sonra olmalıdır"
+                detail="Başlangıç zamanı bitiş zamanından küçük olmalıdır"
             )
         
-        # Tahminleri yap
+        # Tahmin et
         predictions = await get_bulk_predictions(
             inverter_ids, start_time, end_time, interval_minutes, db
         )
         
-        # Sonuçları formatla
-        results = {}
-        for inverter_id, inverter_predictions in predictions.items():
-            results[inverter_id] = [
-                {
-                    "timestamp": p.prediction_timestamp,
-                    "predicted_power_output": p.predicted_power_output,
-                    "confidence": p.confidence
-                }
-                for p in inverter_predictions
-            ]
-        
         return {
             "success": True,
-            "predictions": results,
-            "metadata": {
-                "start_time": start_time,
-                "end_time": end_time,
-                "interval_minutes": interval_minutes,
-                "inverter_count": len(inverter_ids)
-            }
+            "inverter_count": len(inverter_ids),
+            "time_range": {
+                "start": start_time,
+                "end": end_time,
+                "interval_minutes": interval_minutes
+            },
+            "predictions": predictions
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Toplu tahmin sırasında bir hata oluştu: {str(e)}"
+            detail=f"Toplu tahmin yapılırken hata oluştu: {str(e)}"
         ) 

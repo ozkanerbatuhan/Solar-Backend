@@ -17,16 +17,25 @@ router = APIRouter()
 @router.post("/predictions/", response_model=InverterPredictionSchema, status_code=status.HTTP_201_CREATED)
 def create_prediction(prediction: InverterPredictionCreate, db: Session = Depends(get_db)):
     """Yeni bir tahmin kaydı oluştur."""
-    # Inverter'ın varlığını kontrol et
-    inverter = db.query(Inverter).filter(Inverter.id == prediction.inverter_id).first()
-    if inverter is None:
-        raise HTTPException(status_code=404, detail="Inverter bulunamadı")
-    
-    db_prediction = InverterPrediction(**prediction.model_dump())
-    db.add(db_prediction)
-    db.commit()
-    db.refresh(db_prediction)
-    return db_prediction
+    try:
+        # Inverter'ın varlığını kontrol et
+        inverter = db.query(Inverter).filter(Inverter.id == prediction.inverter_id).first()
+        if inverter is None:
+            raise HTTPException(status_code=404, detail="Inverter bulunamadı")
+        
+        db_prediction = InverterPrediction(**prediction.model_dump())
+        db.add(db_prediction)
+        db.commit()
+        db.refresh(db_prediction)
+        return db_prediction
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Tahmin kaydı oluşturulurken hata oluştu: {str(e)}"
+        )
 
 @router.get("/predictions/", response_model=List[InverterPredictionSchema])
 def read_predictions(
@@ -36,21 +45,35 @@ def read_predictions(
     db: Session = Depends(get_db)
 ):
     """Tahminleri listeler. Opsiyonel olarak belirli bir inverter için filtrelenebilir."""
-    query = db.query(InverterPrediction)
-    
-    if inverter_id is not None:
-        query = query.filter(InverterPrediction.inverter_id == inverter_id)
-    
-    predictions = query.order_by(InverterPrediction.prediction_timestamp.desc()).offset(skip).limit(limit).all()
-    return predictions
+    try:
+        query = db.query(InverterPrediction)
+        
+        if inverter_id is not None:
+            query = query.filter(InverterPrediction.inverter_id == inverter_id)
+        
+        predictions = query.order_by(InverterPrediction.prediction_timestamp.desc()).offset(skip).limit(limit).all()
+        return predictions
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Tahminler listelenirken hata oluştu: {str(e)}"
+        )
 
 @router.get("/predictions/{prediction_id}", response_model=InverterPredictionSchema)
 def read_prediction(prediction_id: int, db: Session = Depends(get_db)):
     """Belirli bir tahmini ID'sine göre getirir."""
-    prediction = db.query(InverterPrediction).filter(InverterPrediction.id == prediction_id).first()
-    if prediction is None:
-        raise HTTPException(status_code=404, detail="Tahmin bulunamadı")
-    return prediction
+    try:
+        prediction = db.query(InverterPrediction).filter(InverterPrediction.id == prediction_id).first()
+        if prediction is None:
+            raise HTTPException(status_code=404, detail="Tahmin bulunamadı")
+        return prediction
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Tahmin bilgisi alınırken hata oluştu: {str(e)}"
+        )
 
 @router.get("/inverters/{inverter_id}/predictions", response_model=InverterWithPredictions)
 def read_inverter_with_predictions(
@@ -59,16 +82,24 @@ def read_inverter_with_predictions(
     db: Session = Depends(get_db)
 ):
     """Inverter ve ilişkili tahmin verilerini getirir."""
-    inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
-    if inverter is None:
-        raise HTTPException(status_code=404, detail="Inverter bulunamadı")
-    
-    # Son tahminleri al
-    inverter.predictions = db.query(InverterPrediction).filter(
-        InverterPrediction.inverter_id == inverter_id
-    ).order_by(InverterPrediction.prediction_timestamp.desc()).limit(limit).all()
-    
-    return inverter
+    try:
+        inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
+        if inverter is None:
+            raise HTTPException(status_code=404, detail="Inverter bulunamadı")
+        
+        # Son tahminleri al
+        inverter.predictions = db.query(InverterPrediction).filter(
+            InverterPrediction.inverter_id == inverter_id
+        ).order_by(InverterPrediction.prediction_timestamp.desc()).limit(limit).all()
+        
+        return inverter
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Inverter tahminleri alınırken hata oluştu: {str(e)}"
+        )
 
 @router.get("/inverters/{inverter_id}/predict", response_model=InverterPredictionSchema)
 async def predict_inverter_output(
