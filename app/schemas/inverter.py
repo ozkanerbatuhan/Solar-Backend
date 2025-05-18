@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 # Inverter şemaları
 class InverterBase(BaseModel):
@@ -19,8 +19,7 @@ class InverterInDB(InverterBase):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # InverterData şemaları
 class InverterDataBase(BaseModel):
@@ -43,8 +42,7 @@ class InverterDataUpdate(BaseModel):
 class InverterDataInDB(InverterDataBase):
     id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # InverterPrediction şemaları
 class InverterPredictionBase(BaseModel):
@@ -62,8 +60,7 @@ class InverterPredictionInDB(InverterPredictionBase):
     id: int
     timestamp: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # Model şemaları
 class ModelBase(BaseModel):
@@ -79,8 +76,14 @@ class ModelInDB(ModelBase):
     id: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+# Pagination şeması
+class PaginationInfo(BaseModel):
+    total_records: int
+    skip: int
+    limit: int
+    has_more: bool
 
 # Response şemaları
 class Inverter(InverterInDB):
@@ -98,6 +101,7 @@ class Model(ModelInDB):
 # Listeleme şemaları
 class InverterWithData(Inverter):
     data: List[InverterData] = []
+    pagination: Optional[PaginationInfo] = None
 
 class InverterWithPredictions(Inverter):
     predictions: List[InverterPrediction] = []

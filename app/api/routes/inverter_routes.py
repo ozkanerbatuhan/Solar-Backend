@@ -109,14 +109,39 @@ def delete_inverter(inverter_id: int, db: Session = Depends(get_db)):
         )
 
 @router.get("/inverters/{inverter_id}/data", response_model=InverterWithData)
-def read_inverter_with_data(inverter_id: int, db: Session = Depends(get_db)):
-    """Inverter ve ilişkili ölçüm verilerini getirir."""
+def read_inverter_with_data(
+    inverter_id: int, 
+    skip: int = Query(0, description="Atlanacak kayıt sayısı"),
+    limit: int = Query(100, description="Alınacak maksimum kayıt sayısı"),
+    db: Session = Depends(get_db)
+):
+    """Inverter ve ilişkili ölçüm verilerini sayfalı şekilde getirir."""
     try:
         inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
         if inverter is None:
             raise HTTPException(status_code=404, detail="Inverter bulunamadı")
         
-        return inverter
+        # Toplam veri sayısını al
+        total_records = db.query(InverterData).filter(InverterData.inverter_id == inverter_id).count()
+        
+        # Sayfalı verileri al
+        inverter_data = db.query(InverterData).filter(
+            InverterData.inverter_id == inverter_id
+        ).order_by(
+            InverterData.timestamp.desc()
+        ).offset(skip).limit(limit).all()
+        
+        # Şemaya uygun şekilde verileri ata
+        result = InverterWithData.model_validate(inverter)
+        result.data = inverter_data
+        result.pagination = {
+            "total_records": total_records,
+            "skip": skip,
+            "limit": limit,
+            "has_more": total_records > (skip + limit)
+        }
+        
+        return result
     except HTTPException:
         raise
     except Exception as e:
