@@ -13,12 +13,15 @@ from app.models.inverter import Inverter, InverterData
 from app.models.weather import WeatherData
 from app.schemas.inverter import InverterData as InverterDataSchema
 from app.schemas.weather import CSVUploadResponse
-from app.schemas.data import DataUploadResponse, DataStatistics
+from app.schemas.data import DataUploadResponse, DataStatistics, TxtDataUploadResponse, ModelTrainingStatus, ModelTrainingResponse
 from app.services.data_import_service import (
     process_csv_data, 
     validate_csv_data, 
-    fetch_weather_data_for_dates
+    fetch_weather_data_for_dates,
+    process_txt_data,
+    validate_txt_data
 )
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -855,4 +858,205 @@ async def get_inverter_data_summary(
             "total_records": 0,
             "date_range": {"start": None, "end": None},
             "inverter_count": 0
-        } 
+        }
+
+@router.post("/upload-txt", response_model=TxtDataUploadResponse)
+async def upload_txt_data(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    validate_only: bool = Form(False),
+    fetch_weather: bool = Form(True),
+    forced: bool = Form(False),
+    train_models: bool = Form(False),
+    db: Session = Depends(get_db)
+):
+    """
+    TXT dosyasından inverter verilerini yükler.
+    
+    Args:
+        file: TXT dosyası (tab-separated)
+        validate_only: Sadece doğrulama yap, veritabanına kaydetme
+        fetch_weather: İlgili hava durumu verilerini çek
+        forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
+        train_models: Veriler yüklendikten sonra model eğitimi yapılsın mı?
+        db: Veritabanı oturumu
+    """
+    try:
+        # TXT içeriğini oku
+        contents = await file.read()
+        txt_file = io.StringIO(contents.decode('utf-8'))
+        
+        # TXT verilerini doğrula
+        validation_result = validate_txt_data(txt_file)
+        
+        if not validation_result["valid"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=validation_result["message"]
+            )
+        
+        # Sadece doğrulama isteniyorsa, sonuçları döndür
+        if validate_only:
+            return {
+                "success": True,
+                "message": "TXT dosyası doğrulandı",
+                "processed_rows": 0,
+                "statistics": validation_result["statistics"]
+            }
+        
+        # Dosyayı başa sar
+        txt_file.seek(0)
+        
+        # TXT verilerini işle
+        result = await process_txt_data(txt_file, db, forced)
+        
+        job_id = None
+        
+        # Arka planda hava durumu verilerini çek
+        if fetch_weather and result["processed_rows"] > 0:
+            background_tasks.add_task(fetch_weather_data_for_dates, db)
+        
+        # Model eğitimi yapılsın mı?
+        if train_models and result["processed_rows"] > 0:
+            from app.services.model_training_service import start_all_models_training_job
+            
+            # Model eğitim işlemini başlat
+            job_id = await start_all_models_training_job(
+                db_connection_string=str(settings.DATABASE_URL),
+                test_split=True
+            )
+        
+        # Sonuç döndür
+        return {
+            "success": True,
+            "message": f"{result['processed_rows']} satır işlendi, {result['conflict_count']} çakışma, {result['updated_count']} güncelleme",
+            "processed_rows": result["processed_rows"],
+            "conflict_count": result["conflict_count"],
+            "updated_count": result["updated_count"],
+            "total_inverters": result["total_inverters"],
+            "statistics": validation_result["statistics"],
+            "job_id": job_id
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"TXT yükleme hatası: {str(e)}"
+        )
+
+@router.post("/train-models", response_model=ModelTrainingResponse)
+async def train_models(
+    background_tasks: BackgroundTasks,
+    train_type: str = Form(..., description="Eğitim tipi: 'all' veya 'single'"),
+    inverter_id: Optional[int] = Form(None, description="Tek bir inverter için eğitim yapılacaksa, ID'si"),
+    test_split: bool = Form(True, description="Eğitim/test verisi ayrılsın mı?"),
+    test_size: float = Form(0.3, description="Test verisi oranı (0-1 arası)"),
+    db: Session = Depends(get_db)
+):
+    """
+    İnverterler için model eğitimi başlatır.
+    Bu işlem arka planda çalışır ve durumu job_id ile takip edilebilir.
+    
+    Args:
+        train_type: Eğitim tipi ('all': tüm inverterler, 'single': tek inverter)
+        inverter_id: Tek bir inverter için eğitim yapılacaksa ID'si
+        test_split: Eğitim/test verisi ayrılsın mı?
+        test_size: Test verisi oranı (0-1 arası)
+        db: Veritabanı oturumu
+    """
+    try:
+        from app.services.model_training_service import start_model_training_job, start_all_models_training_job
+        
+        job_id = None
+        status = "queued"
+        message = ""
+        
+        # Eğitim tipine göre işlem yap
+        if train_type == "all":
+            # Tüm inverterler için eğitim başlat
+            job_id = await start_all_models_training_job(
+                db_connection_string=str(settings.DATABASE_URL),
+                test_split=test_split,
+                test_size=test_size
+            )
+            message = "Tüm inverterler için model eğitimi başlatıldı"
+            
+        elif train_type == "single":
+            # Tek bir inverter için eğitim kontrolü
+            if not inverter_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="'single' eğitim tipi için inverter_id gereklidir"
+                )
+            
+            # İnverter'in var olup olmadığını kontrol et
+            inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
+            if not inverter:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"ID: {inverter_id} olan inverter bulunamadı"
+                )
+            
+            # Tek inverter için eğitim başlat
+            job_id = await start_model_training_job(
+                inverter_id=inverter_id,
+                db_connection_string=str(settings.DATABASE_URL),
+                test_split=test_split,
+                test_size=test_size
+            )
+            message = f"Inverter {inverter_id} için model eğitimi başlatıldı"
+            
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Geçersiz eğitim tipi. 'all' veya 'single' olmalıdır"
+            )
+        
+        return {
+            "success": True,
+            "message": message,
+            "job_id": job_id,
+            "status": status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model eğitimi başlatma hatası: {str(e)}"
+        )
+
+@router.get("/training-status/{job_id}", response_model=ModelTrainingStatus)
+async def get_training_status(
+    job_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Model eğitim işleminin durumunu döndürür.
+    
+    Args:
+        job_id: İş kimliği
+        db: Veritabanı oturumu
+    """
+    try:
+        from app.services.model_training_service import get_training_job_status
+        
+        # İş durumunu al
+        job_status = get_training_job_status(job_id)
+        
+        if job_status["status"] == "not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"ID: {job_id} olan eğitim işi bulunamadı"
+            )
+        
+        return job_status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Eğitim durumu alınırken hata: {str(e)}"
+        ) 

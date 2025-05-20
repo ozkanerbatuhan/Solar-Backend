@@ -109,6 +109,246 @@ async def process_csv_data(csv_file: io.StringIO, db: Session) -> int:
         db.rollback()
         raise e
 
+async def process_txt_data(txt_file: io.StringIO, db: Session, forced: bool = False) -> Dict[str, Any]:
+    """
+    TXT dosyasından inverter verilerini işler ve veritabanına kaydeder.
+    
+    TXT format beklentisi:
+    - İlk sütun: Zaman damgası
+    - Diğer sütunlar: INV/#/DayEnergy (kWh) formatında güç çıktısı değerleri
+    
+    Args:
+        txt_file: TXT dosyası içeriği
+        db: Veritabanı oturumu
+        forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
+        
+    Returns:
+        İşlenen satır sayısı ve diğer bilgiler içeren bir sözlük
+    """
+    try:
+        # TXT dosyasını tab ayraçlı olarak oku
+        df = pd.read_csv(txt_file, sep='\t')
+        
+        # Boş sütunları kaldır
+        df = df.dropna(axis=1, how='all')
+        
+        # İlk sütun adını "time" olarak değiştir (eğer farklıysa)
+        df = df.rename(columns={df.columns[0]: "time"})
+        
+        # Zaman sütununu datetime formatına çevir
+        df['time'] = pd.to_datetime(df['time'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+        
+        # Inverter sütunlarını tespit et
+        inverter_columns = [col for col in df.columns if col.startswith("INV/") and "DayEnergy" in col]
+        
+        if not inverter_columns:
+            raise ValueError("Hiç inverter veri sütunu (INV/#/DayEnergy) bulunamadı")
+        
+        # Eksik verileri 0 ile doldur
+        df[inverter_columns] = df[inverter_columns].fillna(0)
+        
+        # Veriyi 5 dakikalıktan saatlik formata çevir
+        hourly_df = convert_to_hourly(df, inverter_columns)
+        
+        # Mevcut inverterleri kontrol et, yoksa oluştur
+        for col in inverter_columns:
+            # "INV/1/DayEnergy" formatından inverter id'yi çıkar
+            inv_id = int(col.split('/')[1])
+            
+            inverter = db.query(Inverter).filter(Inverter.id == inv_id).first()
+            if not inverter:
+                # Yeni inverter oluştur
+                inverter = Inverter(
+                    id=inv_id,
+                    name=f"Inverter-{inv_id}",
+                    capacity=10.0,  # Varsayılan kapasite
+                    location=f"Location-{inv_id}",  # Varsayılan konum
+                    is_active=True
+                )
+                db.add(inverter)
+        
+        # İlk işlem için commit
+        db.commit()
+        
+        # Saatlik verileri veritabanına kaydet
+        processed_rows = 0
+        conflict_count = 0
+        updated_count = 0
+        
+        for _, row in hourly_df.iterrows():
+            timestamp = row['time']
+            
+            for col in inverter_columns:
+                # "INV/1/DayEnergy" formatından inverter id'yi çıkar
+                inv_id = int(col.split('/')[1])
+                power_value = row[col]
+                
+                # Mevcut veriyi kontrol et
+                existing = db.query(InverterData).filter(
+                    InverterData.inverter_id == inv_id,
+                    InverterData.timestamp == timestamp
+                ).first()
+                
+                if existing:
+                    if forced:
+                        # Mevcut veriyi güncelle
+                        existing.power_output = float(power_value)
+                        updated_count += 1
+                    else:
+                        # Çakışma durumunda uyarı
+                        conflict_count += 1
+                else:
+                    # Yeni veri oluştur
+                    inverter_data = InverterData(
+                        inverter_id=inv_id,
+                        timestamp=timestamp,
+                        power_output=float(power_value)
+                    )
+                    db.add(inverter_data)
+                    processed_rows += 1
+            
+            # Belirli aralıklarla commit yap
+            if (processed_rows + updated_count) % 100 == 0:
+                db.commit()
+        
+        # Kalan işlemler için commit
+        db.commit()
+        
+        # Sonuç istatistiklerini döndür
+        return {
+            "processed_rows": processed_rows,
+            "conflict_count": conflict_count,
+            "updated_count": updated_count,
+            "total_inverters": len(inverter_columns),
+            "date_range": {
+                "min_date": hourly_df['time'].min(),
+                "max_date": hourly_df['time'].max()
+            }
+        }
+    
+    except Exception as e:
+        # Hata durumunda rollback
+        db.rollback()
+        raise e
+
+def convert_to_hourly(df: pd.DataFrame, inverter_columns: List[str]) -> pd.DataFrame:
+    """
+    5 dakikalık verileri saatlik verilere dönüştürür.
+    Her saat için son 3 değerin ortalamasını alır.
+    
+    Args:
+        df: Orijinal veri çerçevesi
+        inverter_columns: İnverter sütunları listesi
+        
+    Returns:
+        Saatlik verilerden oluşan veri çerçevesi
+    """
+    # Tarih sütununu saat başı olarak yuvarlama
+    df['hour'] = df['time'].dt.floor('H')
+    
+    # Saatlik gruplar oluşturulması
+    result_rows = []
+    
+    # Benzersiz saatleri al
+    unique_hours = df['hour'].unique()
+    
+    for hour in unique_hours:
+        # Bu saat için verileri filtrele
+        hour_data = df[df['hour'] == hour]
+        
+        # Son 3 değerin (varsa) alınması
+        last_rows = hour_data.tail(3)
+        
+        row_dict = {'time': hour}
+        
+        for col in inverter_columns:
+            # İnverter sütunu için son 3 değerin ortalaması
+            if not last_rows.empty:
+                avg_value = last_rows[col].mean()
+                row_dict[col] = avg_value
+            else:
+                row_dict[col] = 0
+        
+        result_rows.append(row_dict)
+    
+    # Yeni veri çerçevesi oluşturma
+    hourly_df = pd.DataFrame(result_rows)
+    
+    return hourly_df
+
+def validate_txt_data(txt_file: io.StringIO) -> Dict[str, Any]:
+    """
+    TXT verilerini doğrular ve temel istatistikleri döndürür.
+    
+    Args:
+        txt_file: TXT dosyası içeriği
+        
+    Returns:
+        Doğrulama sonuçları ve istatistikler
+    """
+    try:
+        # TXT dosyasını tab ayraçlı olarak oku
+        df = pd.read_csv(txt_file, sep='\t')
+        txt_file.seek(0)  # Dosyayı başa sar
+        
+        # Boş sütunları kaldır
+        df = df.dropna(axis=1, how='all')
+        
+        # İlk sütun adını "time" olarak değiştir (eğer farklıysa)
+        df = df.rename(columns={df.columns[0]: "time"})
+        
+        # Zaman sütunu doğrulaması
+        try:
+            df['time'] = pd.to_datetime(df['time'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+            invalid_dates = df['time'].isna().sum()
+            if invalid_dates > 0:
+                return {
+                    "valid": False,
+                    "message": f"{invalid_dates} adet geçersiz tarih formatı bulundu",
+                    "columns": df.columns.tolist()
+                }
+        except Exception as e:
+            return {
+                "valid": False,
+                "message": f"Tarih sütunu doğrulanamadı: {str(e)}",
+                "columns": df.columns.tolist()
+            }
+        
+        # Inverter sütunlarını tespit et
+        inverter_columns = [col for col in df.columns if col.startswith("INV/") and "DayEnergy" in col]
+        
+        if not inverter_columns:
+            return {
+                "valid": False,
+                "message": "Hiç inverter veri sütunu (INV/#/DayEnergy) bulunamadı",
+                "columns": df.columns.tolist()
+            }
+        
+        # Temel istatistikler
+        stats = {
+            "total_rows": len(df),
+            "inverter_count": len(inverter_columns),
+            "inverter_ids": [int(col.split('/')[1]) for col in inverter_columns],
+            "samples_per_hour": df.groupby(df['time'].dt.floor('H')).size().mean(),
+            "date_range": {
+                "min_date": df['time'].min(),
+                "max_date": df['time'].max(),
+                "days": (df['time'].max().date() - df['time'].min().date()).days + 1 if not df.empty else 0
+            }
+        }
+        
+        return {
+            "valid": True,
+            "message": "TXT verisi geçerli",
+            "statistics": stats
+        }
+        
+    except Exception as e:
+        return {
+            "valid": False,
+            "message": f"TXT doğrulama hatası: {str(e)}"
+        }
+
 async def fetch_weather_data_for_dates(db: Session) -> int:
     """
     Veritabanındaki inverter verileri için ilgili hava durumu verilerini çeker.

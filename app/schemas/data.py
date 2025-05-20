@@ -23,4 +23,31 @@ class DataUploadResponse(BaseModel):
     success: bool
     message: str
     processed_rows: int
-    statistics: Optional[Dict[str, Any]] = None 
+    statistics: Optional[Dict[str, Any]] = None
+
+class TxtDataUploadResponse(DataUploadResponse):
+    """TXT veri yükleme yanıt şeması"""
+    conflict_count: Optional[int] = 0
+    updated_count: Optional[int] = 0
+    total_inverters: Optional[int] = 0
+    job_id: Optional[str] = None
+
+class ModelTrainingStatus(BaseModel):
+    """Model eğitim durumu şeması"""
+    model_config = ConfigDict(from_attributes=True)
+    job_id: str
+    status: str  # 'queued', 'running', 'completed', 'failed'
+    progress: float  # 0-100 arası
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    inverter_id: Optional[int] = None
+    message: Optional[str] = None
+    metrics: Optional[Dict[str, Any]] = None
+
+class ModelTrainingResponse(BaseModel):
+    """Model eğitim yanıt şeması"""
+    model_config = ConfigDict(from_attributes=True)
+    success: bool
+    message: str
+    job_id: str
+    status: str 
