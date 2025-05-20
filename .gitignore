@@ -13,3 +13,4 @@ memory-bank
 *.db-trace.db
 *.db-trace.db-journal
 *.db-trace.db-trace
+/app/ml/models/*

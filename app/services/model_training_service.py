@@ -94,13 +94,25 @@ async def _train_model_job(
         active_training_jobs[job_id]["progress"] = 20
         active_training_jobs[job_id]["message"] = f"Özellikler hazırlanıyor"
         
-        # Özellik ve hedef değişkenleri ayır
-        feature_cols = [
+        # Mevcut sütunları kontrol et
+        available_columns = df.columns.tolist()
+        print(f"Mevcut sütunlar: {available_columns}")
+        
+        # Özellik sütunlarını mevcut sütunlara göre düzenle
+        base_feature_cols = [
             'temperature', 'shortwave_radiation', 'direct_radiation',
             'diffuse_radiation', 'direct_normal_irradiance', 'global_tilted_irradiance', 
             'terrestrial_radiation', 'relative_humidity', 'wind_speed', 'visibility',
             'hour', 'day', 'month', 'dayofweek'
         ]
+        
+        # Mevcut sütunlarla kesişim kontrolü
+        feature_cols = [col for col in base_feature_cols if col in available_columns]
+        
+        if not feature_cols:
+            raise ValueError(f"Hiçbir özellik sütunu bulunamadı. Mevcut sütunlar: {available_columns}")
+        
+        print(f"Kullanılan özellik sütunları: {feature_cols}")
         
         X = df[feature_cols]
         y = df["power_output"]
@@ -485,7 +497,7 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     inverter_df = pd.DataFrame([{
         "timestamp": data.timestamp,
         "power_output": data.power_output,
-        "temperature": data.temperature,
+        "inverter_temperature": data.temperature,  # İsim çakışmasını önlemek için yeniden adlandır
         "irradiance": data.irradiance
     } for data in inverter_data])
     
@@ -518,8 +530,11 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
         tolerance=pd.Timedelta("1h")
     )
     
-    # Eksik değerleri doldur
-    df = df.fillna(method="ffill").fillna(method="bfill").fillna(0)
+    # Birleştirilmiş veri çerçevesi sütunlarını kontrol et
+    print(f"Birleştirilmiş veri çerçevesi sütunları: {df.columns.tolist()}")
+    
+    # Eksik değerleri doldur (yeni önerilen yöntem)
+    df = df.ffill().bfill().fillna(0)
     
     # Tarih özelliklerini ekle
     df["hour"] = df["timestamp"].dt.hour
@@ -550,13 +565,25 @@ async def train_model(
     # Eğitim verilerini al
     df = await get_training_data(inverter_id, db)
     
-    # Özellik ve hedef değişkenleri ayır
-    feature_cols = [
+    # Mevcut sütunları kontrol et
+    available_columns = df.columns.tolist()
+    print(f"Mevcut sütunlar: {available_columns}")
+    
+    # Özellik sütunlarını mevcut sütunlara göre düzenle
+    base_feature_cols = [
         'temperature', 'shortwave_radiation', 'direct_radiation',
         'diffuse_radiation', 'direct_normal_irradiance', 'global_tilted_irradiance', 
         'terrestrial_radiation', 'relative_humidity', 'wind_speed', 'visibility',
         'hour', 'day', 'month', 'dayofweek'
     ]
+    
+    # Mevcut sütunlarla kesişim kontrolü
+    feature_cols = [col for col in base_feature_cols if col in available_columns]
+    
+    if not feature_cols:
+        raise ValueError(f"Hiçbir özellik sütunu bulunamadı. Mevcut sütunlar: {available_columns}")
+    
+    print(f"Kullanılan özellik sütunları: {feature_cols}")
     
     X = df[feature_cols]
     y = df["power_output"]
