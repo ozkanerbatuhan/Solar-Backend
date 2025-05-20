@@ -265,17 +265,21 @@ async def _train_model_job(
         # Model meta verisini kaydet
         meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
         
-        # int64, float64 gibi NumPy tiplerini normal Python tiplerine dönüştür
+        # Metrikler ve özellik önemlerini JSON serileştirilebilir hale getir
+        serialized_metrics = serialize_for_json(model_metrics)
+        serialized_feature_importance = serialize_for_json(feature_importance)
+        serialized_data_details = serialize_for_json(data_details)
+        
         model_meta = {
             "model_version": model_version,
             "inverter_id": inverter_id,
             "created_at": datetime.utcnow().isoformat(),
             "model_type": "RandomForestRegressor",
             "model_params": MODEL_PARAMS,
-            "feature_importance": feature_importance,
-            "metrics": model_metrics,
+            "feature_importance": serialized_feature_importance,
+            "metrics": serialized_metrics,
             "data_size": len(X),
-            "data_details": data_details
+            "data_details": serialized_data_details
         }
         
         # JSON serileştirilebilir hale getir
@@ -294,9 +298,9 @@ async def _train_model_job(
             version=model_version,
             model_path=model_path,
             model_type="RandomForestRegressor",
-            metrics=model_metrics,
+            metrics=serialized_metrics,
             is_active=True,
-            feature_importance=feature_importance,
+            feature_importance=serialized_feature_importance,
             created_at=datetime.utcnow()
         )
         
@@ -682,10 +686,10 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
             if col in numeric_cols:
                 print(f"[DEBUG] {col} sütunu nümerik, NaN değerler önce ffill, sonra medyan ile dolduruluyor.")
                 # Önce ffill ile doldur, kalan NaN'ları medyan ile doldur
-                df[col] = df[col].fillna(method='ffill').fillna(df[col].median())
+                df[col] = df[col].ffill().fillna(df[col].median())
             else:
                 print(f"[DEBUG] {col} sütunu nümerik değil, NaN değerler ffill ve bfill ile dolduruluyor.")
-                df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
+                df[col] = df[col].ffill().bfill()
     
     # Aykırı değerleri temizle - main.py'deki gibi
     # power_output için aykırı değer kontrolü
@@ -774,7 +778,7 @@ async def train_model(
     # Eğitim verilerini al
     df = await get_training_data(inverter_id, db)
     
-    # Veri detaylarını sakla
+    # Veri detayları
     data_details = {
         "total_rows_before_filtering": len(df) + df.isna().any(axis=1).sum(),
         "used_rows_after_filtering": len(df),
@@ -910,12 +914,10 @@ async def train_model(
     # Model meta verisini kaydet
     meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
     
-    # Veri detayları
-    data_details = {
-        "total_rows_before_filtering": len(df) + df.isna().any(axis=1).sum(),
-        "used_rows_after_filtering": len(df),
-        "filtered_rows_ratio": ((df.isna().any(axis=1).sum()) / (len(df) + df.isna().any(axis=1).sum())) * 100 if (len(df) + df.isna().any(axis=1).sum()) > 0 else 0
-    }
+    # Metrikler ve özellik önemlerini JSON serileştirilebilir hale getir
+    serialized_metrics = serialize_for_json(model_metrics)
+    serialized_feature_importance = serialize_for_json(feature_importance)
+    serialized_data_details = serialize_for_json(data_details)
     
     model_meta = {
         "model_version": model_version,
@@ -923,10 +925,10 @@ async def train_model(
         "created_at": datetime.utcnow().isoformat(),
         "model_type": "RandomForestRegressor",
         "model_params": MODEL_PARAMS,
-        "feature_importance": feature_importance,
-        "metrics": model_metrics,
+        "feature_importance": serialized_feature_importance,
+        "metrics": serialized_metrics,
         "data_size": len(X),
-        "data_details": data_details
+        "data_details": serialized_data_details
     }
     
     # JSON serileştirilebilir hale getir
@@ -942,9 +944,9 @@ async def train_model(
         version=model_version,
         model_path=model_path,
         model_type="RandomForestRegressor",
-        metrics=model_metrics,
+        metrics=serialized_metrics,
         is_active=True,
-        feature_importance=feature_importance,
+        feature_importance=serialized_feature_importance,
         created_at=datetime.utcnow()
     )
     
@@ -964,10 +966,10 @@ async def train_model(
     return {
         "model_version": model_version,
         "inverter_id": inverter_id,
-        "metrics": model_metrics,
+        "metrics": serialized_metrics,
         "model_path": model_path,
-        "feature_importance": feature_importance,
-        "data_details": data_details
+        "feature_importance": serialized_feature_importance,
+        "data_details": serialized_data_details
     }
 
 async def train_all_models(db: Session, test_split: bool = True) -> Dict[int, Dict[str, Any]]:
