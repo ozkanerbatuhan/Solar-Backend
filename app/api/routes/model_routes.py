@@ -1,14 +1,28 @@
-from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+import json
+import os
+import pandas as pd
+import numpy as np
 
 from app.db.database import get_db
 from app.models.model import Model
-from app.models.inverter import Inverter
-from app.schemas.model import ModelInfo, ModelMetrics, ModelTrainingResponse
-from app.services.model_training_service import train_model, train_all_models, get_model_metrics, get_all_model_metrics
-from app.services.prediction_service import get_prediction, get_bulk_predictions
+from app.models.inverter import Inverter, InverterData
+from app.schemas.model import (
+    ModelInfo,
+    ModelDetail,
+    ModelPrediction,
+    PredictionRequest,
+    ModelTrainingResponse,
+    ModelMetrics,
+    ModelLogResponse
+)
+from app.schemas.data import ModelLogResponse
+from app.services.model_training_service import train_model, train_all_models, get_model_metrics, get_all_model_metrics, MODELS_DIR
+from app.services.prediction_service import get_prediction, get_bulk_predictions, generate_predictions, get_active_model, evaluate_model_on_historical_data
 
 router = APIRouter()
 
@@ -294,4 +308,209 @@ async def predict_bulk_inverter_output(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Toplu tahmin yapılırken hata oluştu: {str(e)}"
-        ) 
+        )
+
+@router.get("/logs/{model_version}", response_model=ModelLogResponse)
+async def get_model_log_file(
+    model_version: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Model eğitimi sırasında oluşturulan log dosyasını dönderir.
+    
+    Args:
+        model_version: Model versiyonu
+        
+    Returns:
+        Log dosyası içeriği
+    """
+    try:
+        # Önce modelin var olup olmadığını kontrol et
+        model_parts = model_version.split('_')
+        if len(model_parts) < 2 or not model_parts[1].isdigit():
+            raise HTTPException(status_code=400, detail="Geçersiz model versiyonu formatı")
+        
+        inverter_id = int(model_parts[1])
+        
+        # Modeli veritabanında bul
+        model = db.query(Model).filter(
+            Model.inverter_id == inverter_id,
+            Model.version == model_version
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model bulunamadı")
+        
+        # Meta dosya yolunu oluştur
+        meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
+        
+        if not os.path.exists(meta_path):
+            raise HTTPException(status_code=404, detail="Model meta dosyası bulunamadı")
+        
+        # Meta dosyasını oku
+        with open(meta_path, "r") as f:
+            model_meta = json.load(f)
+        
+        # Log dosyasının var olup olmadığını kontrol et
+        inverter_name = str(inverter_id)
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(MODELS_DIR))), "logs")
+        log_file = os.path.join(log_dir, f"model_{inverter_name}.log")
+        log_details_file = os.path.join(log_dir, f"model_{inverter_name}_details.txt")
+        
+        logs = []
+        
+        # Log dosyası varsa içeriğini oku
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(" - ", 3)
+                    if len(parts) >= 4:
+                        ts_str, name, level, msg = parts
+                        try:
+                            timestamp = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S,%f")
+                            logs.append({
+                                "timestamp": timestamp,
+                                "level": level,
+                                "message": msg
+                            })
+                        except ValueError:
+                            # Tarih ayrıştırılamadı, satırı atla
+                            continue
+        
+        # Log dosyası yoksa model_meta bilgisini kullan
+        response_data = {
+            "model_version": model_version,
+            "inverter_id": inverter_id,
+            "created_at": datetime.fromisoformat(model_meta["created_at"]) if isinstance(model_meta["created_at"], str) else model_meta["created_at"],
+            "data_summary": model_meta.get("data_details", {}),
+            "feature_importance": model_meta.get("feature_importance", {}),
+            "metrics": model_meta.get("metrics", {}),
+            "logs": logs
+        }
+        
+        return {
+            "success": True,
+            "message": "Model log bilgileri başarıyla alındı",
+            "log": response_data
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Log dosyası alınırken hata oluştu: {str(e)}")
+
+@router.get("/logs/download/{model_version}")
+async def download_model_log_file(
+    model_version: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Model eğitimi sırasında oluşturulan log dosyasını indirir.
+    
+    Args:
+        model_version: Model versiyonu
+        
+    Returns:
+        Log dosyası
+    """
+    try:
+        # Önce modelin var olup olmadığını kontrol et
+        model_parts = model_version.split('_')
+        if len(model_parts) < 2 or not model_parts[1].isdigit():
+            raise HTTPException(status_code=400, detail="Geçersiz model versiyonu formatı")
+        
+        inverter_id = int(model_parts[1])
+        
+        # Modeli veritabanında bul
+        model = db.query(Model).filter(
+            Model.inverter_id == inverter_id,
+            Model.version == model_version
+        ).first()
+        
+        if not model:
+            raise HTTPException(status_code=404, detail="Model bulunamadı")
+        
+        # Log dosyasının var olup olmadığını kontrol et
+        inverter_name = str(inverter_id)
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(MODELS_DIR))), "logs")
+        log_file = os.path.join(log_dir, f"model_{inverter_name}.log")
+        log_details_file = os.path.join(log_dir, f"model_{inverter_name}_details.txt")
+        
+        # Detaylı log dosyası varsa onu tercih et
+        if os.path.exists(log_details_file):
+            return FileResponse(
+                path=log_details_file,
+                filename=f"model_{inverter_name}_details.txt",
+                media_type="text/plain"
+            )
+        # Normal log dosyası varsa onu kullan
+        elif os.path.exists(log_file):
+            return FileResponse(
+                path=log_file,
+                filename=f"model_{inverter_name}.log",
+                media_type="text/plain"
+            )
+        else:
+            # Log dosyası yoksa, model meta dosyasından bir log oluştur
+            meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
+            
+            if not os.path.exists(meta_path):
+                raise HTTPException(status_code=404, detail="Model meta dosyası bulunamadı")
+            
+            # Meta dosyasını oku
+            with open(meta_path, "r") as f:
+                model_meta = json.load(f)
+            
+            # Geçici bir log dosyası oluştur
+            temp_log_file = os.path.join(MODELS_DIR, f"temp_{model_version}_log.txt")
+            
+            with open(temp_log_file, "w", encoding="utf-8") as f:
+                f.write(f"{'='*80}\n")
+                f.write(f"{' '*30}İNVERTER {inverter_name} MODEL ÖZETİ\n")
+                f.write(f"{'='*80}\n\n")
+                
+                f.write(f"Model Versiyonu: {model_version}\n")
+                f.write(f"Oluşturulma Tarihi: {model_meta.get('created_at', 'Bilinmiyor')}\n\n")
+                
+                f.write(f"1. VERİ ÖZETİ\n")
+                f.write(f"{'-'*80}\n\n")
+                
+                data_details = model_meta.get("data_details", {})
+                f.write(f"    Toplam Satır: {data_details.get('total_rows', 'Bilinmiyor')}\n")
+                f.write(f"    Kullanılan Satır: {data_details.get('used_rows', 'Bilinmiyor')}\n\n")
+                
+                f.write(f"2. MODEL METRİKLERİ\n")
+                f.write(f"{'-'*80}\n\n")
+                
+                metrics = model_meta.get("metrics", {})
+                f.write(f"    R² Skoru    : {metrics.get('r2', 'Bilinmiyor')}\n")
+                f.write(f"    MAE         : {metrics.get('mae', 'Bilinmiyor')}\n")
+                f.write(f"    RMSE        : {metrics.get('rmse', 'Bilinmiyor')}\n")
+                f.write(f"    MAPE        : {metrics.get('mape', 'Bilinmiyor')}%\n\n")
+                
+                f.write(f"3. KULLANILAN ÖZELLİKLER\n")
+                f.write(f"{'-'*80}\n\n")
+                
+                feature_cols = metrics.get("features", [])
+                for feat in feature_cols:
+                    f.write(f"    - {feat}\n")
+                
+                f.write(f"\n4. ÖZELLİK ÖNEMLERİ\n")
+                f.write(f"{'-'*80}\n\n")
+                
+                f.write(f"{'Özellik':<30}{'Önem':>15}\n")
+                f.write(f"{'-'*45}\n")
+                
+                feature_importance = model_meta.get("feature_importance", {})
+                sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+                
+                for feature, importance in sorted_features:
+                    f.write(f"{feature:<30}{importance:>15.4f}\n")
+            
+            return FileResponse(
+                path=temp_log_file,
+                filename=f"model_{inverter_name}_summary.txt",
+                media_type="text/plain",
+                background=lambda: os.remove(temp_log_file) if os.path.exists(temp_log_file) else None
+            )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Log dosyası indirilirken hata oluştu: {str(e)}") 

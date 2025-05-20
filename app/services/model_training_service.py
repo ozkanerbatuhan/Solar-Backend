@@ -97,9 +97,9 @@ async def _train_model_job(
         
         # Veri detaylarını sakla
         data_details = {
-            "total_rows_before_dropna": len(df) + df.isna().any(axis=1).sum(),
-            "used_rows_after_dropna": len(df),
-            "dropped_rows_ratio": (df.isna().any(axis=1).sum() / (len(df) + df.isna().any(axis=1).sum())) * 100 if len(df) > 0 else 0
+            "total_rows": len(df),
+            "used_rows": len(df),
+            "dropped_rows_ratio": 0
         }
         
         active_training_jobs[job_id]["progress"] = 20
@@ -114,7 +114,7 @@ async def _train_model_job(
             'temperature', 'shortwave_radiation', 'direct_radiation',
             'diffuse_radiation', 'direct_normal_irradiance', 'global_tilted_irradiance', 
             'terrestrial_radiation', 'relative_humidity', 'wind_speed', 'visibility',
-            'hour', 'day', 'month', 'dayofweek'
+            'hour', 'day', 'month', 'dayofweek', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
         ]
         
         # Mevcut sütunlarla kesişim kontrolü
@@ -141,24 +141,46 @@ async def _train_model_job(
             active_training_jobs[job_id]["progress"] = 40
             active_training_jobs[job_id]["message"] = f"İlk model eğitimi başlıyor"
             
+            # NaN kontrolü - main.py'de olduğu gibi
+            if X_train.isna().any().any():
+                print("Eğitim setinde NaN değerler var, medyan ile doldurulacak.")
+                X_train = X_train.fillna(X_train.median())
+            
+            if X_test.isna().any().any():
+                print("Test setinde NaN değerler var, medyan ile doldurulacak.")
+                X_test = X_test.fillna(X_test.median())
+            
+            # RobustScaler uygulaması - main.py'deki gibi
+            from sklearn.preprocessing import RobustScaler
+            scaler = RobustScaler()
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
+            
             model = RandomForestRegressor(**MODEL_PARAMS)
-            model.fit(X_train, y_train)
+            model.fit(X_train_scaled, y_train)
             
             active_training_jobs[job_id]["progress"] = 60
             active_training_jobs[job_id]["message"] = f"Model performans metriksleri hesaplanıyor"
             
             # Test seti üzerinde tahmin yap
-            y_pred = model.predict(X_test)
+            y_pred = model.predict(X_test_scaled)
             
             # Model metriklerini hesapla
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             mae = mean_absolute_error(y_test, y_pred)
             r2 = r2_score(y_test, y_pred)
             
+            # MAPE hesaplama (main.py'deki gibi güvenli hesaplama)
+            mask = y_test > 1.0  # 1 kWh'den büyük değerler için
+            mape = 0.0
+            if mask.sum() > 0:
+                mape = np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100
+            
             model_metrics = {
                 "rmse": float(rmse),
                 "mae": float(mae),
                 "r2": float(r2),
+                "mape": float(mape),
                 "test_size": 0.2,  # Sabit değer
                 "samples_count": len(X),
                 "features": feature_cols,
@@ -171,8 +193,18 @@ async def _train_model_job(
         active_training_jobs[job_id]["progress"] = 70
         active_training_jobs[job_id]["message"] = f"Final model eğitimi başlıyor (tüm veri)"
         
+        # NaN kontrolü - son kontrol
+        if X.isna().any().any():
+            print("Veri setinde NaN değerler var, medyan ile doldurulacak.")
+            X = X.fillna(X.median())
+        
+        # RobustScaler ile ölçeklendirme
+        from sklearn.preprocessing import RobustScaler
+        final_scaler = RobustScaler()
+        X_scaled = pd.DataFrame(final_scaler.fit_transform(X), columns=feature_cols)
+        
         final_model = RandomForestRegressor(**MODEL_PARAMS)
-        final_model.fit(X, y)
+        final_model.fit(X_scaled, y)
         
         active_training_jobs[job_id]["progress"] = 80
         active_training_jobs[job_id]["message"] = f"Özellik önemi hesaplanıyor"
@@ -197,6 +229,7 @@ async def _train_model_job(
         # Model meta verisini kaydet
         meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
         
+        # int64, float64 gibi NumPy tiplerini normal Python tiplerine dönüştür
         model_meta = {
             "model_version": model_version,
             "inverter_id": inverter_id,
@@ -208,6 +241,9 @@ async def _train_model_job(
             "data_size": len(X),
             "data_details": data_details
         }
+        
+        # JSON serileştirilebilir hale getir
+        model_meta = serialize_for_json(model_meta)
         
         with open(meta_path, "w") as f:
             json.dump(model_meta, f, indent=2)
@@ -550,8 +586,12 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     # Birleştirilmiş veri çerçevesi sütunlarını kontrol et
     print(f"Birleştirilmiş veri çerçevesi sütunları: {df.columns.tolist()}")
     
-    # Eksik değerleri NaN olarak bırak ve NaN içeren satırları çıkar
-    df = df.dropna()
+    # NaN değerleri kontrol et
+    nan_columns = df.columns[df.isna().any()].tolist()
+    if nan_columns:
+        print(f"Aşağıdaki sütunlarda NaN değerler bulundu: {nan_columns}")
+        # main.py'deki gibi NaN değerleri doldur - öne ve arkaya doldurma (ffill ve bfill)
+        df = df.fillna(method='ffill').fillna(method='bfill')
     
     # Tarih özelliklerini ekle
     df["hour"] = df["timestamp"].dt.hour
@@ -559,7 +599,33 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     df["month"] = df["timestamp"].dt.month
     df["dayofweek"] = df["timestamp"].dt.dayofweek
     
+    # Main.py'deki gibi trigonometrik zaman özellikleri ekleme
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour']/24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour']/24)
+    
+    # Gün numarası yerine ay kullanılacak
+    df['day_sin'] = np.sin(2 * np.pi * df['month']/12)
+    df['day_cos'] = np.cos(2 * np.pi * df['month']/12)
+    
     return df
+
+# JSON serileştirme için yardımcı fonksiyon
+def serialize_for_json(obj):
+    """
+    NumPy objelerini JSON için serileştirilebilir Python tiplerine dönüştürür.
+    """
+    if isinstance(obj, (np.integer, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_for_json(item) for item in obj]
+    else:
+        return obj
 
 async def train_model(
     inverter_id: int,
@@ -594,7 +660,7 @@ async def train_model(
         'temperature', 'shortwave_radiation', 'direct_radiation',
         'diffuse_radiation', 'direct_normal_irradiance', 'global_tilted_irradiance', 
         'terrestrial_radiation', 'relative_humidity', 'wind_speed', 'visibility',
-        'hour', 'day', 'month', 'dayofweek'
+        'hour', 'day', 'month', 'dayofweek', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
     ]
     
     # Mevcut sütunlarla kesişim kontrolü
@@ -610,34 +676,57 @@ async def train_model(
     
     model_metrics = {}
     
+    # NaN kontrolü
+    if X.isna().any().any():
+        print("Veri setinde NaN değerler var, medyan ile doldurulacak.")
+        X = X.fillna(X.median())
+    
     # İki aşamalı eğitim
     # 1. Aşama: Test bölünmesi ile metrik hesaplama
     if test_split:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
+        # RobustScaler ile ölçeklendirme
+        from sklearn.preprocessing import RobustScaler
+        scaler = RobustScaler()
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
+        
         model = RandomForestRegressor(**MODEL_PARAMS)
-        model.fit(X_train, y_train)
+        model.fit(X_train_scaled, y_train)
         
         # Test seti üzerinde tahmin yap
-        y_pred = model.predict(X_test)
+        y_pred = model.predict(X_test_scaled)
         
         # Model metriklerini hesapla
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         mae = mean_absolute_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
         
+        # MAPE hesaplama (main.py'deki gibi güvenli hesaplama)
+        mask = y_test > 1.0  # 1 kWh'den büyük değerler için
+        mape = 0.0
+        if mask.sum() > 0:
+            mape = np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100
+        
         model_metrics = {
             "rmse": float(rmse),
             "mae": float(mae),
             "r2": float(r2),
+            "mape": float(mape),
             "test_size": 0.2,  # Sabit değer
             "samples_count": len(X),
             "features": feature_cols
         }
     
     # 2. Aşama: Tüm verilerle final model eğitimi
+    # RobustScaler ile ölçeklendirme
+    from sklearn.preprocessing import RobustScaler
+    final_scaler = RobustScaler()
+    X_scaled = pd.DataFrame(final_scaler.fit_transform(X), columns=feature_cols)
+    
     final_model = RandomForestRegressor(**MODEL_PARAMS)
-    final_model.fit(X, y)
+    final_model.fit(X_scaled, y)
     
     # Özellik önemliliği
     feature_importance = {
@@ -656,6 +745,13 @@ async def train_model(
     # Model meta verisini kaydet
     meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
     
+    # Veri detayları
+    data_details = {
+        "total_rows": len(df),
+        "used_rows": len(df),
+        "dropped_rows_ratio": 0
+    }
+    
     model_meta = {
         "model_version": model_version,
         "inverter_id": inverter_id,
@@ -665,12 +761,11 @@ async def train_model(
         "feature_importance": feature_importance,
         "metrics": model_metrics,
         "data_size": len(X),
-        "data_details": {
-            "total_rows_before_dropna": len(df) + df.isna().any(axis=1).sum(),
-            "used_rows_after_dropna": len(df),
-            "dropped_rows_ratio": (df.isna().any(axis=1).sum() / (len(df) + df.isna().any(axis=1).sum())) * 100 if len(df) > 0 else 0
-        }
+        "data_details": data_details
     }
+    
+    # JSON serileştirilebilir hale getir
+    model_meta = serialize_for_json(model_meta)
     
     with open(meta_path, "w") as f:
         json.dump(model_meta, f, indent=2)
@@ -705,7 +800,7 @@ async def train_model(
         "metrics": model_metrics,
         "model_path": model_path,
         "feature_importance": feature_importance,
-        "data_details": model_meta["data_details"]
+        "data_details": data_details
     }
 
 async def train_all_models(db: Session, test_split: bool = True) -> Dict[int, Dict[str, Any]]:
