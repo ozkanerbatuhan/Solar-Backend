@@ -7,13 +7,20 @@ from sqlalchemy import text
 # Veritabanı ve modeller
 from app.db.database import engine, Base, get_db
 from app.models import model, inverter, weather
-from app.core.config import settings
 
 # API rotaları
+from app.core.config import settings
 from app.api.routes import inverter_routes, model_routes, data_routes, weather_routes
 
 # Loglama yapılandırması
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("app.log")
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Veritabanı tablolarını oluştur
@@ -23,12 +30,12 @@ try:
     logger.info("Veritabanı tabloları başarıyla oluşturuldu.")
 except Exception as e:
     logger.error(f"Veritabanı tablolarını oluştururken hata: {e}")
-    # Hataya rağmen uygulamayı çalıştırmaya devam et
+    # Hata aldık ama çalıştırmaya devam et
 
 # FastAPI uygulamasını oluştur
 app = FastAPI(
     title="Solar Inverter Prediction API",
-    description="Güneş enerjisi inverterları için güç çıktısı tahmin API'si",
+    description="Güneş enerjisi inverterleri için güç çıktısı tahmin API'si",
     version="0.1.0"
 )
 

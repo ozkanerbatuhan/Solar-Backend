@@ -491,7 +491,7 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     
     # Hava durumu verilerini al
     weather_data = db.query(WeatherData).filter(
-        WeatherData.is_forecast == False
+        WeatherData.is_forecast == 0  # Boolean değil, integer tipinde (0: gerçek ölçüm)
     ).all()
     
     # Hava durumu verilerini DataFrame'e dönüştür

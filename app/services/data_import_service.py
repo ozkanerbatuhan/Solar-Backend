@@ -4,6 +4,7 @@ import numpy as np
 from typing import List, Dict, Any, Union, Optional
 from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.models.inverter import Inverter, InverterData
 from app.services.weather_service import fetch_historical_weather
@@ -363,8 +364,8 @@ async def fetch_weather_data_for_dates(db: Session) -> int:
     try:
         # Tarih aralığını bul
         date_range = db.query(
-            db.func.min(InverterData.timestamp).label("min_date"),
-            db.func.max(InverterData.timestamp).label("max_date")
+            func.min(InverterData.timestamp).label("min_date"),
+            func.max(InverterData.timestamp).label("max_date")
         ).first()
         
         if not date_range.min_date or not date_range.max_date:
@@ -394,6 +395,9 @@ async def fetch_weather_data_for_dates(db: Session) -> int:
     except Exception as e:
         # Hata durumunda rollback
         db.rollback()
+        import traceback
+        print(f"Hava durumu verisi çekilirken hata: {str(e)}")
+        print(traceback.format_exc())
         raise e
 
 def get_datetime_ranges(data: pd.DataFrame, timestamp_col: str = "timestamp") -> Dict[str, Any]:
