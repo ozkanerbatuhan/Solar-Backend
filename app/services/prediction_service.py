@@ -383,3 +383,147 @@ async def get_bulk_predictions(
         results[inverter_id] = predictions
     
     return results 
+
+async def get_active_model(inverter_id: int, db: Session) -> Optional[Model]:
+    """
+    Belirtilen inverter için aktif modeli döndürür.
+    
+    Args:
+        inverter_id: Model bilgisi alınacak inverter ID'si
+        db: Veritabanı oturumu
+        
+    Returns:
+        Optional[Model]: Aktif model veya None
+    """
+    # Inverter için aktif modeli kontrol et
+    active_model = db.query(Model).filter(
+        Model.inverter_id == inverter_id,
+        Model.is_active == True
+    ).first()
+    
+    return active_model
+
+async def generate_predictions(
+    inverter_id: int,
+    start_time: datetime,
+    end_time: datetime,
+    interval_minutes: int,
+    db: Session,
+    use_cached: bool = True
+) -> List[InverterPrediction]:
+    """
+    Belirli bir zaman aralığında tahminler oluşturur.
+    
+    Args:
+        inverter_id: Tahmin yapılacak inverter ID'si
+        start_time: Başlangıç zamanı
+        end_time: Bitiş zamanı
+        interval_minutes: Tahmin aralığı (dakika)
+        db: Veritabanı oturumu
+        use_cached: Eğer varsa, önceden hesaplanmış tahminleri kullan
+        
+    Returns:
+        List[InverterPrediction]: Tahmin listesi
+    """
+    # Zaman aralığındaki tüm noktaları hesapla
+    time_points = []
+    current_time = start_time
+    
+    while current_time <= end_time:
+        time_points.append(current_time)
+        current_time += timedelta(minutes=interval_minutes)
+    
+    # Her zaman noktası için tahmin yap
+    predictions = []
+    
+    for timestamp in time_points:
+        try:
+            prediction = await get_prediction(inverter_id, timestamp, db, use_cached)
+            predictions.append(prediction)
+        except Exception as e:
+            print(f"Tahmin hatası ({inverter_id}, {timestamp}): {str(e)}")
+    
+    return predictions
+
+async def evaluate_model_on_historical_data(
+    inverter_id: int,
+    start_date: datetime,
+    end_date: datetime,
+    db: Session
+) -> Dict[str, Any]:
+    """
+    Modeli geçmiş veriler üzerinde değerlendirir.
+    
+    Args:
+        inverter_id: Değerlendirilecek inverter ID'si
+        start_date: Başlangıç tarihi
+        end_date: Bitiş tarihi
+        db: Veritabanı oturumu
+        
+    Returns:
+        Dict[str, Any]: Değerlendirme metrikleri
+    """
+    from app.models.inverter import InverterData
+    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    
+    # Aktif modeli yükle
+    model, model_meta = await load_model(inverter_id, db)
+    
+    if model is None:
+        raise ValueError(f"İnverter {inverter_id} için aktif model bulunamadı")
+    
+    # Geçmiş inverter verilerini al
+    inverter_data = db.query(InverterData).filter(
+        InverterData.inverter_id == inverter_id,
+        InverterData.timestamp >= start_date,
+        InverterData.timestamp <= end_date,
+        InverterData.power_output.isnot(None)
+    ).all()
+    
+    if not inverter_data:
+        raise ValueError(f"İnverter {inverter_id} için belirtilen tarih aralığında veri bulunamadı")
+    
+    # Gerçek güç çıkışı değerlerini al
+    actual_data = {data.timestamp: data.power_output for data in inverter_data}
+    
+    # Her zaman noktası için tahmin yap
+    predictions = []
+    actuals = []
+    
+    for timestamp, actual_power in actual_data.items():
+        try:
+            # Tahmini hesapla (cache kullanma)
+            prediction = await get_prediction(inverter_id, timestamp, db, use_cached=False)
+            
+            # Tahmin ve gerçek değerleri kaydet
+            predictions.append(prediction.predicted_power_output)
+            actuals.append(actual_power)
+        except Exception as e:
+            print(f"Değerlendirme hatası ({inverter_id}, {timestamp}): {str(e)}")
+    
+    # Metrikleri hesapla
+    rmse = np.sqrt(mean_squared_error(actuals, predictions))
+    mae = mean_absolute_error(actuals, predictions)
+    r2 = r2_score(actuals, predictions)
+    
+    # MAPE hesaplama (güvenli)
+    mask = np.array(actuals) > 1.0  # 1 kWh'den büyük değerler için
+    mape = 0.0
+    if np.sum(mask) > 0:
+        mape = np.mean(np.abs((np.array(actuals)[mask] - np.array(predictions)[mask]) / np.array(actuals)[mask])) * 100
+    
+    return {
+        "inverter_id": inverter_id,
+        "evaluation_period": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        },
+        "data_points": len(actuals),
+        "metrics": {
+            "rmse": float(rmse),
+            "mae": float(mae),
+            "r2": float(r2),
+            "mape": float(mape)
+        },
+        "model_version": model_meta.get("model_version", "unknown")
+    } 
