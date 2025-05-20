@@ -13,7 +13,7 @@ from app.models.inverter import Inverter, InverterData
 from app.models.weather import WeatherData
 from app.schemas.inverter import InverterData as InverterDataSchema
 from app.schemas.weather import CSVUploadResponse
-from app.schemas.data import DataUploadResponse, DataStatistics, TxtDataUploadResponse, ModelTrainingStatus, ModelTrainingResponse
+from app.schemas.data import DataUploadResponse, DataStatistics, TxtDataUploadResponse, ModelTrainingStatus, ModelTrainingResponse, TxtDataUploadJob, ModelLogResponse
 from app.services.data_import_service import (
     process_csv_data, 
     validate_csv_data, 
@@ -910,26 +910,28 @@ async def upload_txt_data(
         # TXT verilerini işle
         result = await process_txt_data(txt_file, db, forced)
         
-        job_id = None
+        job_id = result.get("job_id")
         
         # Arka planda hava durumu verilerini çek
         if fetch_weather and result["processed_rows"] > 0:
             background_tasks.add_task(fetch_weather_data_for_dates, db)
         
         # Model eğitimi yapılsın mı?
-        if train_models and result["processed_rows"] > 0:
+        train_job_id = None
+        if train_models and job_id:
             from app.services.model_training_service import start_all_models_training_job
             
             # Model eğitim işlemini başlat
-            job_id = await start_all_models_training_job(
+            train_job_id = await start_all_models_training_job(
                 db_connection_string=str(settings.DATABASE_URL),
-                test_split=True
+                test_split=True,
+                test_size=0.2
             )
         
         # Sonuç döndür
         return {
             "success": True,
-            "message": f"{result['processed_rows']} satır işlendi, {result['conflict_count']} çakışma, {result['updated_count']} güncelleme",
+            "message": f"Veri yükleme işlemi başlatıldı, durum için /api/data/txt-job-status/{job_id} endpointi kullanılabilir",
             "processed_rows": result["processed_rows"],
             "conflict_count": result["conflict_count"],
             "updated_count": result["updated_count"],
@@ -944,13 +946,193 @@ async def upload_txt_data(
             detail=f"TXT yükleme hatası: {str(e)}"
         )
 
+@router.get("/txt-job-status/{job_id}", response_model=TxtDataUploadJob)
+async def get_txt_job_status(
+    job_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    TXT veri yükleme işleminin durumunu döndürür.
+    
+    Args:
+        job_id: İş kimliği
+        db: Veritabanı oturumu
+    """
+    try:
+        from app.services.data_import_service import get_txt_upload_job_status
+        
+        # İş durumunu al
+        job_status = get_txt_upload_job_status(job_id)
+        
+        if job_status["status"] == "not_found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"ID: {job_id} olan TXT yükleme işi bulunamadı"
+            )
+        
+        return job_status
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"TXT yükleme durumu alınırken hata: {str(e)}"
+        )
+
+@router.get("/model-logs/{model_version}", response_model=ModelLogResponse)
+async def get_model_logs(
+    model_version: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Belirli bir model versiyonu için eğitim loglarını döndürür.
+    
+    Args:
+        model_version: Model versiyonu
+        db: Veritabanı oturumu
+    """
+    try:
+        from app.models.model import Model
+        import os
+        import json
+        
+        # Modeli veritabanında ara
+        model = db.query(Model).filter(Model.version == model_version).first()
+        
+        if not model:
+            return {
+                "success": False,
+                "message": f"Model versiyonu bulunamadı: {model_version}",
+                "log": None
+            }
+        
+        # Model meta dosyasını kontrol et
+        meta_path = os.path.join(os.path.dirname(model.model_path), f"{model_version}_meta.json")
+        
+        if not os.path.exists(meta_path):
+            return {
+                "success": False,
+                "message": f"Model meta dosyası bulunamadı: {meta_path}",
+                "log": None
+            }
+        
+        # Meta dosyasını oku
+        with open(meta_path, "r") as f:
+            model_meta = json.load(f)
+        
+        # Log nesnesi oluştur
+        from app.schemas.data import ModelLog, ModelLogEntry
+        
+        # Örnek log kayıtları (gerçek loglar yoksa)
+        log_entries = []
+        
+        # Mevcut log dosyası varsa oku
+        log_path = os.path.join(os.path.dirname(model.model_path), f"{model_version}.log")
+        if os.path.exists(log_path):
+            with open(log_path, "r") as f:
+                log_lines = f.readlines()
+                for line in log_lines:
+                    parts = line.strip().split(" - ", 3)
+                    if len(parts) >= 3:
+                        try:
+                            timestamp = datetime.fromisoformat(parts[0])
+                            level = parts[2]
+                            message = parts[3] if len(parts) > 3 else ""
+                            log_entries.append(ModelLogEntry(
+                                timestamp=timestamp,
+                                level=level,
+                                message=message
+                            ))
+                        except Exception as e:
+                            print(f"Log satırı ayrıştırılamadı: {line}, Hata: {str(e)}")
+        
+        # Eğer log kayıtları yoksa en azından temel bilgileri içeren bir log ekle
+        if not log_entries:
+            log_entries.append(ModelLogEntry(
+                timestamp=model.created_at,
+                level="INFO",
+                message=f"Model eğitimi tamamlandı. Metrikler: {json.dumps(model.metrics, ensure_ascii=False)}"
+            ))
+        
+        # Veri özeti (data_details)
+        data_summary = model_meta.get("data_details", {})
+        if not data_summary:
+            data_summary = {
+                "total_rows": model_meta.get("data_size", 0),
+                "used_rows": model_meta.get("data_size", 0),
+                "dropped_rows_ratio": 0
+            }
+        
+        # ModelLog nesnesi oluştur
+        model_log = ModelLog(
+            model_version=model_version,
+            inverter_id=model.inverter_id,
+            created_at=model.created_at,
+            data_summary=data_summary,
+            feature_importance=model.feature_importance or {},
+            metrics=model.metrics or {},
+            logs=log_entries
+        )
+        
+        return {
+            "success": True,
+            "message": "Model eğitim logları başarıyla alındı",
+            "log": model_log
+        }
+        
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        
+        return {
+            "success": False,
+            "message": f"Model logları alınırken hata oluştu: {str(e)}",
+            "log": None
+        }
+
+@router.get("/cleanup-jobs")
+async def cleanup_jobs(
+    hours: int = Query(24, description="Temizlenecek saatlerin sayısı"),
+    db: Session = Depends(get_db)
+):
+    """
+    Belirli bir süreden daha eski işleri temizler.
+    
+    Args:
+        hours: Maksimum saat cinsinden yaş
+        db: Veritabanı oturumu
+    """
+    try:
+        from app.services.model_training_service import cleanup_old_jobs
+        from app.services.data_import_service import cleanup_old_txt_upload_jobs
+        
+        # Eski model eğitim işlerini temizle
+        removed_model_jobs = cleanup_old_jobs(hours)
+        
+        # Eski TXT yükleme işlerini temizle
+        removed_txt_jobs = cleanup_old_txt_upload_jobs(hours)
+        
+        return {
+            "success": True,
+            "message": f"{removed_model_jobs} model eğitim işi ve {removed_txt_jobs} TXT yükleme işi temizlendi",
+            "removed_model_jobs": removed_model_jobs,
+            "removed_txt_jobs": removed_txt_jobs
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"İşler temizlenirken hata: {str(e)}"
+        )
+
 @router.post("/train-models", response_model=ModelTrainingResponse)
 async def train_models(
     background_tasks: BackgroundTasks,
     train_type: str = Form(..., description="Eğitim tipi: 'all' veya 'single'"),
     inverter_id: Optional[int] = Form(None, description="Tek bir inverter için eğitim yapılacaksa, ID'si"),
     test_split: bool = Form(True, description="Eğitim/test verisi ayrılsın mı?"),
-    test_size: float = Form(0.3, description="Test verisi oranı (0-1 arası)"),
+    test_size: float = Form(0.2, description="Test verisi oranı (0-1 arası)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -961,7 +1143,7 @@ async def train_models(
         train_type: Eğitim tipi ('all': tüm inverterler, 'single': tek inverter)
         inverter_id: Tek bir inverter için eğitim yapılacaksa ID'si
         test_split: Eğitim/test verisi ayrılsın mı?
-        test_size: Test verisi oranı (0-1 arası)
+        test_size: Test verisi oranı (0-1 arası) - Sabit 0.2 kullanılacak
         db: Veritabanı oturumu
     """
     try:
@@ -977,7 +1159,7 @@ async def train_models(
             job_id = await start_all_models_training_job(
                 db_connection_string=str(settings.DATABASE_URL),
                 test_split=test_split,
-                test_size=test_size
+                test_size=0.2  # Sabit 0.2 değeri kullan
             )
             message = "Tüm inverterler için model eğitimi başlatıldı"
             
@@ -1002,7 +1184,7 @@ async def train_models(
                 inverter_id=inverter_id,
                 db_connection_string=str(settings.DATABASE_URL),
                 test_split=test_split,
-                test_size=test_size
+                test_size=0.2  # Sabit 0.2 değeri kullan
             )
             message = f"Inverter {inverter_id} için model eğitimi başlatıldı"
             

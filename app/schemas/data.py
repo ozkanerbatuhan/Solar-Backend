@@ -50,4 +50,44 @@ class ModelTrainingResponse(BaseModel):
     success: bool
     message: str
     job_id: str
-    status: str 
+    status: str
+
+class ModelLogEntry(BaseModel):
+    """Model eğitim günlüğü kaydı şeması"""
+    model_config = ConfigDict(from_attributes=True)
+    timestamp: datetime
+    level: str  # 'INFO', 'WARNING', 'ERROR', vs.
+    message: str
+
+class ModelLog(BaseModel):
+    """Model eğitim günlüğü şeması"""
+    model_config = ConfigDict(from_attributes=True)
+    model_version: str
+    inverter_id: int
+    created_at: datetime
+    data_summary: Dict[str, Any]  # Veri özeti - kullanılan/eksik satır sayısı vs.
+    feature_importance: Dict[str, float]  # Özellik önemi
+    metrics: Dict[str, Any]  # Model metrikleri
+    logs: List[ModelLogEntry]  # Eğitim sırasında oluşturulan günlük kayıtları
+    
+class ModelLogResponse(BaseModel):
+    """Model eğitim günlüğü yanıt şeması"""
+    model_config = ConfigDict(from_attributes=True)
+    success: bool
+    message: str
+    log: Optional[ModelLog] = None
+
+class TxtDataUploadJob(BaseModel):
+    """TXT veri yükleme job şeması"""
+    model_config = ConfigDict(from_attributes=True)
+    job_id: str
+    status: str  # 'queued', 'running', 'completed', 'failed'
+    progress: float  # 0-100 arası
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    message: Optional[str] = None
+    processed_rows: int = 0
+    conflict_count: int = 0
+    updated_count: int = 0
+    total_inverters: int = 0
+    file_name: Optional[str] = None 

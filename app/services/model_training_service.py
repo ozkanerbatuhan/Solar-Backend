@@ -21,13 +21,14 @@ from app.models.model import Model
 
 # Model eğitim ve tahmin için parametreler
 MODEL_PARAMS = {
-    "n_estimators": 100,
-    "max_depth": 10,
-    "min_samples_split": 2,
-    "min_samples_leaf": 1,
+    "n_estimators": 200,
+    "max_depth": 15,
+    "min_samples_split": 5,
+    "min_samples_leaf": 2,
     "random_state": 42,
     "n_jobs": -1
 }
+
 
 # Modellerin kaydedileceği klasör
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ml", "models")
@@ -57,7 +58,7 @@ async def _train_model_job(
     inverter_id: int,
     db_connection_string: str,
     test_split: bool = True,
-    test_size: float = 0.3
+    test_size: float = 0.2
 ):
     """
     Arka planda model eğitimi yapar.
@@ -67,9 +68,12 @@ async def _train_model_job(
         inverter_id: İnverter kimliği
         db_connection_string: Veritabanı bağlantı bilgisi
         test_split: Test bölünmesi yapılsın mı?
-        test_size: Test seti oranı
+        test_size: Test seti oranı (sabit 0.2)
     """
     global active_training_jobs
+    
+    # Test size parametresini 0.2 olarak sabitliyoruz
+    test_size = 0.2
     
     # SqlAlchemy session oluştur
     from sqlalchemy import create_engine
@@ -90,6 +94,13 @@ async def _train_model_job(
         
         # Eğitim verilerini al
         df = await get_training_data(inverter_id, db)
+        
+        # Veri detaylarını sakla
+        data_details = {
+            "total_rows_before_dropna": len(df) + df.isna().any(axis=1).sum(),
+            "used_rows_after_dropna": len(df),
+            "dropped_rows_ratio": (df.isna().any(axis=1).sum() / (len(df) + df.isna().any(axis=1).sum())) * 100 if len(df) > 0 else 0
+        }
         
         active_training_jobs[job_id]["progress"] = 20
         active_training_jobs[job_id]["message"] = f"Özellikler hazırlanıyor"
@@ -125,7 +136,7 @@ async def _train_model_job(
             active_training_jobs[job_id]["progress"] = 30
             active_training_jobs[job_id]["message"] = f"Model eğitim/test verisi hazırlanıyor"
             
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
             
             active_training_jobs[job_id]["progress"] = 40
             active_training_jobs[job_id]["message"] = f"İlk model eğitimi başlıyor"
@@ -148,9 +159,10 @@ async def _train_model_job(
                 "rmse": float(rmse),
                 "mae": float(mae),
                 "r2": float(r2),
-                "test_size": test_size,
+                "test_size": 0.2,  # Sabit değer
                 "samples_count": len(X),
-                "features": feature_cols
+                "features": feature_cols,
+                "data_details": data_details
             }
             
             active_training_jobs[job_id]["metrics"] = model_metrics
@@ -193,7 +205,8 @@ async def _train_model_job(
             "model_params": MODEL_PARAMS,
             "feature_importance": feature_importance,
             "metrics": model_metrics,
-            "data_size": len(X)
+            "data_size": len(X),
+            "data_details": data_details
         }
         
         with open(meta_path, "w") as f:
@@ -237,7 +250,8 @@ async def _train_model_job(
             "inverter_id": inverter_id,
             "metrics": model_metrics,
             "model_path": model_path,
-            "feature_importance": feature_importance
+            "feature_importance": feature_importance,
+            "data_details": data_details
         }
         
     except Exception as e:
@@ -263,7 +277,7 @@ async def start_model_training_job(
     inverter_id: int, 
     db_connection_string: str,
     test_split: bool = True, 
-    test_size: float = 0.3
+    test_size: float = 0.2
 ) -> str:
     """
     Belirli bir inverter için model eğitim işlemi başlatır.
@@ -299,7 +313,7 @@ async def start_model_training_job(
 async def start_all_models_training_job(
     db_connection_string: str,
     test_split: bool = True, 
-    test_size: float = 0.3
+    test_size: float = 0.2
 ) -> str:
     """
     Tüm inverterler için model eğitim işlemi başlatır.
@@ -307,12 +321,15 @@ async def start_all_models_training_job(
     Args:
         db_connection_string: Veritabanı bağlantı bilgisi
         test_split: Test bölünmesi yapılsın mı?
-        test_size: Test seti oranı
+        test_size: Test seti oranı - Sabit 0.2 değerinde (parametre hala alınıyor ama kullanılmıyor)
         
     Returns:
         İş kimliği
     """
     global active_training_jobs
+    
+    # Test size parametresini 0.2 olarak sabitliyoruz
+    test_size = 0.2
     
     # SqlAlchemy session oluştur
     from sqlalchemy import create_engine
@@ -350,7 +367,7 @@ async def start_all_models_training_job(
                 inverter_id=inverter_id,
                 db_connection_string=db_connection_string,
                 test_split=test_split,
-                test_size=test_size
+                test_size=0.2  # Sabit 0.2 değerini kullan
             )
             
             # Ana işte alt işleri izle
@@ -533,8 +550,8 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     # Birleştirilmiş veri çerçevesi sütunlarını kontrol et
     print(f"Birleştirilmiş veri çerçevesi sütunları: {df.columns.tolist()}")
     
-    # Eksik değerleri doldur (yeni önerilen yöntem)
-    df = df.ffill().bfill().fillna(0)
+    # Eksik değerleri NaN olarak bırak ve NaN içeren satırları çıkar
+    df = df.dropna()
     
     # Tarih özelliklerini ekle
     df["hour"] = df["timestamp"].dt.hour
@@ -548,7 +565,7 @@ async def train_model(
     inverter_id: int,
     db: Session,
     test_split: bool = True,
-    test_size: float = 0.3
+    test_size: float = 0.2
 ) -> Dict[str, Any]:
     """
     Belirli bir inverter için model eğitimi yapar.
@@ -557,11 +574,14 @@ async def train_model(
         inverter_id: İnverter kimliği
         db: Veritabanı oturumu
         test_split: Test bölünmesi yapılsın mı?
-        test_size: Test seti oranı
+        test_size: Test seti oranı (sabit 0.2)
         
     Returns:
         Model eğitim sonuçları ve metrikleri
     """
+    # Test size parametresini sabit 0.2 olarak kullanalım
+    test_size = 0.2
+    
     # Eğitim verilerini al
     df = await get_training_data(inverter_id, db)
     
@@ -593,7 +613,7 @@ async def train_model(
     # İki aşamalı eğitim
     # 1. Aşama: Test bölünmesi ile metrik hesaplama
     if test_split:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
         model = RandomForestRegressor(**MODEL_PARAMS)
         model.fit(X_train, y_train)
@@ -610,7 +630,7 @@ async def train_model(
             "rmse": float(rmse),
             "mae": float(mae),
             "r2": float(r2),
-            "test_size": test_size,
+            "test_size": 0.2,  # Sabit değer
             "samples_count": len(X),
             "features": feature_cols
         }
@@ -644,7 +664,12 @@ async def train_model(
         "model_params": MODEL_PARAMS,
         "feature_importance": feature_importance,
         "metrics": model_metrics,
-        "data_size": len(X)
+        "data_size": len(X),
+        "data_details": {
+            "total_rows_before_dropna": len(df) + df.isna().any(axis=1).sum(),
+            "used_rows_after_dropna": len(df),
+            "dropped_rows_ratio": (df.isna().any(axis=1).sum() / (len(df) + df.isna().any(axis=1).sum())) * 100 if len(df) > 0 else 0
+        }
     }
     
     with open(meta_path, "w") as f:
@@ -679,7 +704,8 @@ async def train_model(
         "inverter_id": inverter_id,
         "metrics": model_metrics,
         "model_path": model_path,
-        "feature_importance": feature_importance
+        "feature_importance": feature_importance,
+        "data_details": model_meta["data_details"]
     }
 
 async def train_all_models(db: Session, test_split: bool = True) -> Dict[int, Dict[str, Any]]:
