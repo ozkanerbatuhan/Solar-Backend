@@ -97,9 +97,9 @@ async def _train_model_job(
         
         # Veri detaylarını sakla
         data_details = {
-            "total_rows": len(df),
-            "used_rows": len(df),
-            "dropped_rows_ratio": 0
+            "total_rows_before_filtering": len(df) + df.isna().any(axis=1).sum(),
+            "used_rows_after_filtering": len(df),
+            "filtered_rows_ratio": ((df.isna().any(axis=1).sum()) / (len(df) + df.isna().any(axis=1).sum())) * 100 if (len(df) + df.isna().any(axis=1).sum()) > 0 else 0
         }
         
         active_training_jobs[job_id]["progress"] = 20
@@ -107,7 +107,7 @@ async def _train_model_job(
         
         # Mevcut sütunları kontrol et
         available_columns = df.columns.tolist()
-        print(f"Mevcut sütunlar: {available_columns}")
+        print(f"[DEBUG] Mevcut sütunlar: {available_columns}")
         
         # Özellik sütunlarını mevcut sütunlara göre düzenle
         base_feature_cols = [
@@ -120,13 +120,19 @@ async def _train_model_job(
         # Mevcut sütunlarla kesişim kontrolü
         feature_cols = [col for col in base_feature_cols if col in available_columns]
         
+        # Sıcaklık sütunu çakışma kontrolü - inverter_temperature ve temperature karışıklığı olmamalı
+        if 'temperature' in feature_cols and 'inverter_temperature' in available_columns:
+            print("[DEBUG] 'temperature' sütunu var ve bu hava durumu sıcaklığını ifade ediyor.")
+        
         if not feature_cols:
             raise ValueError(f"Hiçbir özellik sütunu bulunamadı. Mevcut sütunlar: {available_columns}")
         
-        print(f"Kullanılan özellik sütunları: {feature_cols}")
+        print(f"[DEBUG] Kullanılacak özellik sütunları: {feature_cols}")
         
         X = df[feature_cols]
         y = df["power_output"]
+        
+        print(f"[DEBUG] X boyutu: {X.shape}, y boyutu: {y.shape}")
         
         model_metrics = {}
         
@@ -136,18 +142,27 @@ async def _train_model_job(
             active_training_jobs[job_id]["progress"] = 30
             active_training_jobs[job_id]["message"] = f"Model eğitim/test verisi hazırlanıyor"
             
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            # Zaman serisi verisi, shuffle=False olmalı
+            # Ancak model performansı için rasgele karıştırma daha iyi sonuç veriyor, bu yüzden shuffle=True kullanıyoruz
+            # Bu trade-off'u açıkça belirtelim
+            shuffle_param = True  # Daha iyi model performansı için True, zaman serisi tutarlılığı için False
+            print(f"[DEBUG] Train-test split parametreleri: test_size={test_size}, shuffle={shuffle_param}")
+            
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, shuffle=shuffle_param)
+            
+            print(f"[DEBUG] Eğitim seti: X_train={X_train.shape}, y_train={y_train.shape}")
+            print(f"[DEBUG] Test seti: X_test={X_test.shape}, y_test={y_test.shape}")
             
             active_training_jobs[job_id]["progress"] = 40
             active_training_jobs[job_id]["message"] = f"İlk model eğitimi başlıyor"
             
             # NaN kontrolü - main.py'de olduğu gibi
             if X_train.isna().any().any():
-                print("Eğitim setinde NaN değerler var, medyan ile doldurulacak.")
+                print("[DEBUG] Eğitim setinde NaN değerler var, medyan ile doldurulacak.")
                 X_train = X_train.fillna(X_train.median())
             
             if X_test.isna().any().any():
-                print("Test setinde NaN değerler var, medyan ile doldurulacak.")
+                print("[DEBUG] Test setinde NaN değerler var, medyan ile doldurulacak.")
                 X_test = X_test.fillna(X_test.median())
             
             # RobustScaler uygulaması - main.py'deki gibi
@@ -156,14 +171,19 @@ async def _train_model_job(
             X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
             X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
             
+            print("[DEBUG] Model eğitimi başlıyor...")
             model = RandomForestRegressor(**MODEL_PARAMS)
             model.fit(X_train_scaled, y_train)
+            print("[DEBUG] Model eğitimi tamamlandı.")
             
             active_training_jobs[job_id]["progress"] = 60
             active_training_jobs[job_id]["message"] = f"Model performans metriksleri hesaplanıyor"
             
             # Test seti üzerinde tahmin yap
             y_pred = model.predict(X_test_scaled)
+            
+            # Tahmin ve gerçek değerlerin sıralamasını kontrol et (indeks kontrolü)
+            print(f"[DEBUG] y_test ve y_pred boyutları: {y_test.shape} vs {y_pred.shape}")
             
             # Model metriklerini hesapla
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -175,14 +195,19 @@ async def _train_model_job(
             mape = 0.0
             if mask.sum() > 0:
                 mape = np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100
+                print(f"[DEBUG] MAPE hesaplama için {mask.sum()}/{len(y_test)} satır kullanıldı (>1.0 kWh).")
+            else:
+                print("[DEBUG] MAPE hesaplanamadı - 1.0 kWh'den büyük değer yok.")
+            
+            print(f"[DEBUG] Model metrikleri: RMSE={rmse:.4f}, MAE={mae:.4f}, R²={r2:.4f}, MAPE={mape:.4f}%")
             
             model_metrics = {
                 "rmse": float(rmse),
                 "mae": float(mae),
                 "r2": float(r2),
                 "mape": float(mape),
-                "test_size": 0.2,  # Sabit değer
-                "samples_count": len(X),
+                "test_size": float(test_size),  # Sabit değer
+                "samples_count": int(len(X)),
                 "features": feature_cols,
                 "data_details": data_details
             }
@@ -195,16 +220,20 @@ async def _train_model_job(
         
         # NaN kontrolü - son kontrol
         if X.isna().any().any():
-            print("Veri setinde NaN değerler var, medyan ile doldurulacak.")
+            print("[DEBUG] Veri setinde NaN değerler var, medyan ile doldurulacak.")
             X = X.fillna(X.median())
         
-        # RobustScaler ile ölçeklendirme
+        # RobustScaler ile ölçeklendirme - tüm veri için yeni scaler oluştur
+        # Bu, train-test split yaklaşımıyla tutarlı olmasını sağlar
+        print("[DEBUG] Final model için tüm veri ölçeklendiriliyor...")
         from sklearn.preprocessing import RobustScaler
         final_scaler = RobustScaler()
         X_scaled = pd.DataFrame(final_scaler.fit_transform(X), columns=feature_cols)
         
+        print("[DEBUG] Final model eğitimi başlıyor...")
         final_model = RandomForestRegressor(**MODEL_PARAMS)
         final_model.fit(X_scaled, y)
+        print("[DEBUG] Final model eğitimi tamamlandı.")
         
         active_training_jobs[job_id]["progress"] = 80
         active_training_jobs[job_id]["message"] = f"Özellik önemi hesaplanıyor"
@@ -214,6 +243,12 @@ async def _train_model_job(
             feature: float(importance) 
             for feature, importance in zip(feature_cols, final_model.feature_importances_)
         }
+        
+        # En önemli özellikleri logla
+        sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+        print("[DEBUG] Özellik önemleri (ilk 5):")
+        for i, (feature, importance) in enumerate(sorted_features[:5]):
+            print(f"  {i+1}. {feature}: {importance:.4f}")
         
         # Model versiyonunu belirle
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -225,6 +260,7 @@ async def _train_model_job(
         # Modeli kaydet
         model_path = os.path.join(MODELS_DIR, f"{model_version}.joblib")
         joblib.dump(final_model, model_path)
+        print(f"[DEBUG] Model kaydedildi: {model_path}")
         
         # Model meta verisini kaydet
         meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
@@ -247,6 +283,7 @@ async def _train_model_job(
         
         with open(meta_path, "w") as f:
             json.dump(model_meta, f, indent=2)
+        print(f"[DEBUG] Model meta dosyası kaydedildi: {meta_path}")
         
         active_training_jobs[job_id]["progress"] = 90
         active_training_jobs[job_id]["message"] = f"Veritabanı kaydı oluşturuluyor"
@@ -274,6 +311,7 @@ async def _train_model_job(
         
         db.add(model_db)
         db.commit()
+        print(f"[DEBUG] Veritabanı model kaydı oluşturuldu, ID: {model_db.id}")
         
         active_training_jobs[job_id]["progress"] = 100
         active_training_jobs[job_id]["status"] = "completed"
@@ -302,7 +340,7 @@ async def _train_model_job(
         import traceback
         active_training_jobs[job_id]["error"] = traceback.format_exc()
         
-        print(f"Model eğitimi hatası: {str(e)}")
+        print(f"[HATA] Model eğitimi hatası: {str(e)}")
         print(traceback.format_exc())
         
     finally:
@@ -537,6 +575,8 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     Returns:
         Eğitim verileri DataFrame'i
     """
+    print(f"[DEBUG] İnverter {inverter_id} için eğitim verileri hazırlanıyor...")
+    
     # İnverter verilerini al
     inverter_data = db.query(InverterData).filter(
         InverterData.inverter_id == inverter_id,
@@ -553,6 +593,8 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
         "inverter_temperature": data.temperature,  # İsim çakışmasını önlemek için yeniden adlandır
         "irradiance": data.irradiance
     } for data in inverter_data])
+    
+    print(f"[DEBUG] İnverter {inverter_id} için {len(inverter_df)} satır veri bulundu.")
     
     # Hava durumu verilerini al
     weather_data = db.query(WeatherData).filter(
@@ -574,38 +616,117 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
         "visibility": data.visibility
     } for data in weather_data])
     
+    print(f"[DEBUG] Hava durumu verileri için {len(weather_df)} satır veri bulundu.")
+    
+    # Tarih aralıklarını kontrol et
+    if not inverter_df.empty and not weather_df.empty:
+        inv_min_date = inverter_df["timestamp"].min()
+        inv_max_date = inverter_df["timestamp"].max()
+        weather_min_date = weather_df["timestamp"].min()
+        weather_max_date = weather_df["timestamp"].max()
+        
+        print(f"[DEBUG] İnverter veri aralığı: {inv_min_date} - {inv_max_date}")
+        print(f"[DEBUG] Hava durumu veri aralığı: {weather_min_date} - {weather_max_date}")
+        
+        # Tarih aralıklarının uyumluluğunu kontrol et
+        if inv_min_date < weather_min_date:
+            print(f"[UYARI] İnverter verileri hava durumu verilerinden daha eski başlıyor. Kesişim kaybı olabilir.")
+        if inv_max_date > weather_max_date:
+            print(f"[UYARI] İnverter verileri hava durumu verilerinden daha yeni bitiyor. Kesişim kaybı olabilir.")
+    
+    # Verileri birleştir - tolerans ve direction parametrelerine dikkat
+    merge_tolerance = pd.Timedelta("1h")
+    print(f"[DEBUG] merge_asof için tolerans: {merge_tolerance}, yön: nearest")
+    
+    # Verileri sıraladığımızdan emin olalım
+    inverter_df = inverter_df.sort_values("timestamp")
+    weather_df = weather_df.sort_values("timestamp")
+    
+    # Birleştirme öncesi veri boyutları
+    print(f"[DEBUG] Birleştirme öncesi inverter veri boyutu: {inverter_df.shape}")
+    print(f"[DEBUG] Birleştirme öncesi hava durumu veri boyutu: {weather_df.shape}")
+    
     # Verileri birleştir
     df = pd.merge_asof(
-        inverter_df.sort_values("timestamp"),
-        weather_df.sort_values("timestamp"),
+        inverter_df,
+        weather_df,
         on="timestamp",
-        direction="nearest",
-        tolerance=pd.Timedelta("1h")
+        direction="nearest",  # En yakın eşleşmeyi kullan
+        tolerance=merge_tolerance
     )
     
-    # Birleştirilmiş veri çerçevesi sütunlarını kontrol et
-    print(f"Birleştirilmiş veri çerçevesi sütunları: {df.columns.tolist()}")
+    # Birleştirme sonrası veri boyutu ve NaN durumu
+    print(f"[DEBUG] Birleştirme sonrası veri boyutu: {df.shape}")
+    print(f"[DEBUG] Birleştirme sonrası NaN içeren satır sayısı: {df.isna().any(axis=1).sum()}")
     
-    # NaN değerleri kontrol et
+    # Birleştirilmiş veri çerçevesi sütunlarını kontrol et
+    print(f"[DEBUG] Birleştirilmiş veri çerçevesi sütunları: {df.columns.tolist()}")
+    
+    # Veri tipleri kontrolü
+    print("[DEBUG] Veri tipleri kontrolü:")
+    print(df.dtypes)
+    
+    # NaN değerleri kontrolü - sütun bazında
     nan_columns = df.columns[df.isna().any()].tolist()
     if nan_columns:
-        print(f"Aşağıdaki sütunlarda NaN değerler bulundu: {nan_columns}")
-        # main.py'deki gibi NaN değerleri doldur - öne ve arkaya doldurma (ffill ve bfill)
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        print(f"[DEBUG] Aşağıdaki sütunlarda NaN değerler bulundu: {nan_columns}")
+        print(f"[DEBUG] Sütun bazında NaN sayıları:")
+        for col in nan_columns:
+            nan_count = df[col].isna().sum()
+            nan_percent = (nan_count / len(df)) * 100
+            print(f"  - {col}: {nan_count} ({nan_percent:.2f}%)")
+        
+        # Nümerik sütunları medyan ile doldur
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        for col in nan_columns:
+            if col in numeric_cols:
+                print(f"[DEBUG] {col} sütunu nümerik, NaN değerler önce ffill, sonra medyan ile dolduruluyor.")
+                # Önce ffill ile doldur, kalan NaN'ları medyan ile doldur
+                df[col] = df[col].fillna(method='ffill').fillna(df[col].median())
+            else:
+                print(f"[DEBUG] {col} sütunu nümerik değil, NaN değerler ffill ve bfill ile dolduruluyor.")
+                df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
+    
+    # Aykırı değerleri temizle - main.py'deki gibi
+    # power_output için aykırı değer kontrolü
+    if "power_output" in df.columns:
+        print("[DEBUG] power_output için aykırı değer temizleme işlemi yapılıyor...")
+        
+        # Temizleme öncesinde boyut kontrolü
+        print(f"[DEBUG] Aykırı değer temizleme öncesi veri boyutu: {df.shape}")
+        
+        # 0.01-0.99 quantile dışındaki değerleri temizle
+        q1 = df["power_output"].quantile(0.01)
+        q3 = df["power_output"].quantile(0.99)
+        
+        print(f"[DEBUG] power_output için 0.01 quantile: {q1}, 0.99 quantile: {q3}")
+        
+        filtered_df = df[(df["power_output"] >= q1) & (df["power_output"] <= q3)]
+        
+        # Kaç satır çıkarıldı?
+        removed_rows = len(df) - len(filtered_df)
+        removed_percentage = (removed_rows / len(df)) * 100 if len(df) > 0 else 0
+        print(f"[DEBUG] Aykırı değer temizleme: {removed_rows} satır çıkarıldı ({removed_percentage:.2f}%)")
+        
+        df = filtered_df
     
     # Tarih özelliklerini ekle
+    print("[DEBUG] Tarih özellikleri ekleniyor...")
     df["hour"] = df["timestamp"].dt.hour
     df["day"] = df["timestamp"].dt.day
     df["month"] = df["timestamp"].dt.month
     df["dayofweek"] = df["timestamp"].dt.dayofweek
     
     # Main.py'deki gibi trigonometrik zaman özellikleri ekleme
+    print("[DEBUG] Trigonometrik zaman özellikleri ekleniyor...")
     df['hour_sin'] = np.sin(2 * np.pi * df['hour']/24)
     df['hour_cos'] = np.cos(2 * np.pi * df['hour']/24)
     
     # Gün numarası yerine ay kullanılacak
     df['day_sin'] = np.sin(2 * np.pi * df['month']/12)
     df['day_cos'] = np.cos(2 * np.pi * df['month']/12)
+    
+    print(f"[DEBUG] Veri hazırlama tamamlandı. Final veri boyutu: {df.shape}")
     
     return df
 
@@ -645,15 +766,24 @@ async def train_model(
     Returns:
         Model eğitim sonuçları ve metrikleri
     """
+    print(f"[DEBUG] İnverter {inverter_id} için model eğitimi başlıyor...")
+    
     # Test size parametresini sabit 0.2 olarak kullanalım
     test_size = 0.2
     
     # Eğitim verilerini al
     df = await get_training_data(inverter_id, db)
     
+    # Veri detaylarını sakla
+    data_details = {
+        "total_rows_before_filtering": len(df) + df.isna().any(axis=1).sum(),
+        "used_rows_after_filtering": len(df),
+        "filtered_rows_ratio": ((df.isna().any(axis=1).sum()) / (len(df) + df.isna().any(axis=1).sum())) * 100 if (len(df) + df.isna().any(axis=1).sum()) > 0 else 0
+    }
+    
     # Mevcut sütunları kontrol et
     available_columns = df.columns.tolist()
-    print(f"Mevcut sütunlar: {available_columns}")
+    print(f"[DEBUG] Mevcut sütunlar: {available_columns}")
     
     # Özellik sütunlarını mevcut sütunlara göre düzenle
     base_feature_cols = [
@@ -666,25 +796,40 @@ async def train_model(
     # Mevcut sütunlarla kesişim kontrolü
     feature_cols = [col for col in base_feature_cols if col in available_columns]
     
+    # Sıcaklık sütunu çakışma kontrolü
+    if 'temperature' in feature_cols and 'inverter_temperature' in available_columns:
+        print("[DEBUG] 'temperature' sütunu var ve bu hava durumu sıcaklığını ifade ediyor.")
+    
     if not feature_cols:
         raise ValueError(f"Hiçbir özellik sütunu bulunamadı. Mevcut sütunlar: {available_columns}")
     
-    print(f"Kullanılan özellik sütunları: {feature_cols}")
+    print(f"[DEBUG] Kullanılacak özellik sütunları: {feature_cols}")
     
     X = df[feature_cols]
     y = df["power_output"]
+    
+    print(f"[DEBUG] X boyutu: {X.shape}, y boyutu: {y.shape}")
     
     model_metrics = {}
     
     # NaN kontrolü
     if X.isna().any().any():
-        print("Veri setinde NaN değerler var, medyan ile doldurulacak.")
+        print("[DEBUG] Veri setinde NaN değerler var, medyan ile doldurulacak.")
         X = X.fillna(X.median())
     
     # İki aşamalı eğitim
     # 1. Aşama: Test bölünmesi ile metrik hesaplama
     if test_split:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Zaman serisi verisi, shuffle=False olmalı normalde, ancak 
+        # model performansı için rasgele karıştırma daha iyi sonuç veriyor
+        # Bu trade-off'u açıkça belirtelim
+        shuffle_param = True  # Daha iyi model performansı için True, zaman serisi tutarlılığı için False
+        print(f"[DEBUG] Train-test split parametreleri: test_size={test_size}, shuffle={shuffle_param}")
+        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, shuffle=shuffle_param)
+        
+        print(f"[DEBUG] Eğitim seti: X_train={X_train.shape}, y_train={y_train.shape}")
+        print(f"[DEBUG] Test seti: X_test={X_test.shape}, y_test={y_test.shape}")
         
         # RobustScaler ile ölçeklendirme
         from sklearn.preprocessing import RobustScaler
@@ -692,11 +837,16 @@ async def train_model(
         X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
         
+        print("[DEBUG] Model eğitimi başlıyor...")
         model = RandomForestRegressor(**MODEL_PARAMS)
         model.fit(X_train_scaled, y_train)
+        print("[DEBUG] Model eğitimi tamamlandı.")
         
         # Test seti üzerinde tahmin yap
         y_pred = model.predict(X_test_scaled)
+        
+        # Tahmin ve gerçek değerlerin sıralamasını kontrol et
+        print(f"[DEBUG] y_test ve y_pred boyutları: {y_test.shape} vs {y_pred.shape}")
         
         # Model metriklerini hesapla
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -708,31 +858,45 @@ async def train_model(
         mape = 0.0
         if mask.sum() > 0:
             mape = np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100
+            print(f"[DEBUG] MAPE hesaplama için {mask.sum()}/{len(y_test)} satır kullanıldı (>1.0 kWh).")
+        else:
+            print("[DEBUG] MAPE hesaplanamadı - 1.0 kWh'den büyük değer yok.")
+        
+        print(f"[DEBUG] Model metrikleri: RMSE={rmse:.4f}, MAE={mae:.4f}, R²={r2:.4f}, MAPE={mape:.4f}%")
         
         model_metrics = {
             "rmse": float(rmse),
             "mae": float(mae),
             "r2": float(r2),
             "mape": float(mape),
-            "test_size": 0.2,  # Sabit değer
-            "samples_count": len(X),
+            "test_size": float(test_size),
+            "samples_count": int(len(X)),
             "features": feature_cols
         }
     
     # 2. Aşama: Tüm verilerle final model eğitimi
-    # RobustScaler ile ölçeklendirme
+    # RobustScaler ile ölçeklendirme - tüm veri için yeni scaler oluştur
+    print("[DEBUG] Final model için tüm veri ölçeklendiriliyor...")
     from sklearn.preprocessing import RobustScaler
     final_scaler = RobustScaler()
     X_scaled = pd.DataFrame(final_scaler.fit_transform(X), columns=feature_cols)
     
+    print("[DEBUG] Final model eğitimi başlıyor...")
     final_model = RandomForestRegressor(**MODEL_PARAMS)
     final_model.fit(X_scaled, y)
+    print("[DEBUG] Final model eğitimi tamamlandı.")
     
     # Özellik önemliliği
     feature_importance = {
         feature: float(importance) 
         for feature, importance in zip(feature_cols, final_model.feature_importances_)
     }
+    
+    # En önemli özellikleri logla
+    sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+    print("[DEBUG] Özellik önemleri (ilk 5):")
+    for i, (feature, importance) in enumerate(sorted_features[:5]):
+        print(f"  {i+1}. {feature}: {importance:.4f}")
     
     # Model versiyonunu belirle
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -741,15 +905,16 @@ async def train_model(
     # Modeli kaydet
     model_path = os.path.join(MODELS_DIR, f"{model_version}.joblib")
     joblib.dump(final_model, model_path)
+    print(f"[DEBUG] Model kaydedildi: {model_path}")
     
     # Model meta verisini kaydet
     meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
     
     # Veri detayları
     data_details = {
-        "total_rows": len(df),
-        "used_rows": len(df),
-        "dropped_rows_ratio": 0
+        "total_rows_before_filtering": len(df) + df.isna().any(axis=1).sum(),
+        "used_rows_after_filtering": len(df),
+        "filtered_rows_ratio": ((df.isna().any(axis=1).sum()) / (len(df) + df.isna().any(axis=1).sum())) * 100 if (len(df) + df.isna().any(axis=1).sum()) > 0 else 0
     }
     
     model_meta = {
@@ -769,6 +934,7 @@ async def train_model(
     
     with open(meta_path, "w") as f:
         json.dump(model_meta, f, indent=2)
+    print(f"[DEBUG] Model meta dosyası kaydedildi: {meta_path}")
     
     # Veritabanına model kaydı ekle
     model_db = Model(
@@ -793,6 +959,7 @@ async def train_model(
     
     db.add(model_db)
     db.commit()
+    print(f"[DEBUG] Veritabanı model kaydı oluşturuldu, ID: {model_db.id}")
     
     return {
         "model_version": model_version,

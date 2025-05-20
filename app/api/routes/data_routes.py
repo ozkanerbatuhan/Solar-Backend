@@ -937,7 +937,8 @@ async def upload_txt_data(
             "updated_count": result["updated_count"],
             "total_inverters": result["total_inverters"],
             "statistics": validation_result["statistics"],
-            "job_id": job_id
+            "job_id": job_id,
+            "train_job_id": train_job_id
         }
     
     except Exception as e:
