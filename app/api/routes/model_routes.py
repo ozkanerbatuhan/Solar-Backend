@@ -13,16 +13,12 @@ from app.models.model import Model
 from app.models.inverter import Inverter, InverterData
 from app.schemas.model import (
     ModelInfo,
-    ModelDetail,
-    ModelPrediction,
-    PredictionRequest,
     ModelTrainingResponse,
-    ModelMetrics,
-    ModelLogResponse
+    ModelMetrics
 )
 from app.schemas.data import ModelLogResponse
 from app.services.model_training_service import train_model, train_all_models, get_model_metrics, get_all_model_metrics, MODELS_DIR
-from app.services.prediction_service import get_prediction, get_bulk_predictions, generate_predictions, get_active_model, evaluate_model_on_historical_data
+from app.services.prediction_service import get_prediction, get_bulk_predictions
 
 router = APIRouter()
 
