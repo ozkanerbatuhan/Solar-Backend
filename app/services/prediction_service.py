@@ -6,6 +6,7 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 import json
 
 from app.models.inverter import InverterPrediction, Inverter
@@ -270,8 +271,8 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
             WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
         ).order_by(
             # En yakın zaman damgasına göre sırala
-            db.func.abs(db.func.extract('epoch', WeatherForecast.forecast_timestamp) - 
-                       db.func.extract('epoch', timestamp))
+            func.abs(func.extract('epoch', WeatherForecast.forecast_timestamp) - 
+                   func.extract('epoch', timestamp))
         ).first()
         
         if not weather_data:
