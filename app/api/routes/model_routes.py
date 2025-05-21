@@ -260,8 +260,8 @@ async def predict_inverter_output(
 @router.post("/predict-bulk")
 async def predict_bulk_inverter_output(
     inverter_ids: List[int] = Query(..., description="Tahmin yapılacak inverter ID'leri"),
-    start_time: datetime = Query(..., description="Başlangıç zamanı"),
-    end_time: datetime = Query(..., description="Bitiş zamanı"),
+    start_time: datetime = Query(datetime.now(), description="Başlangıç zamanı"),
+    end_time: datetime = Query(datetime.now() + timedelta(days=7), description="Bitiş zamanı"),
     interval_minutes: int = Query(60, description="Tahmin aralığı (dakika)", ge=15, le=1440),
     db: Session = Depends(get_db)
 ):

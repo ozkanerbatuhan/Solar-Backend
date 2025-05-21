@@ -16,33 +16,36 @@ from app.core.config import settings
 # Modellerin kaydedileceği klasör
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ml", "models")
 
-async def get_prediction(
+async def get_predictions(
     inverter_id: int, 
-    timestamp: datetime, 
-    db: Session,
+    start_date: datetime = None,
+    end_date: datetime = None,
+    interval_hours: int = 1, 
+    db: Session = None,
     use_cached: bool = True
-) -> InverterPrediction:
+) -> List[InverterPrediction]:
     """
-    Belirtilen inverter için tahmin yapar.
+    Belirtilen inverter için bir tarih aralığında tahmin yapar.
     
     Args:
         inverter_id: Tahmin yapılacak inverter ID'si
-        timestamp: Tahmin edilecek zaman
+        start_date: Tahmin başlangıç tarihi (varsayılan: şimdiki zaman)
+        end_date: Tahmin bitiş tarihi (varsayılan: 7 gün sonrası)
+        interval_hours: Tahmin aralığı (saat cinsinden)
         db: Veritabanı oturumu
-        use_cached: Eğer varsa, önceden hesaplanmış tahmini kullan
+        use_cached: Eğer varsa, önceden hesaplanmış tahminleri kullan
     
     Returns:
-        InverterPrediction: Tahmin sonucu
+        List[InverterPrediction]: Tahminlerin listesi
     """
-    # Eğer önceden hesaplanmış tahmin varsa ve use_cached=True ise, onu döndür
-    if use_cached:
-        cached_prediction = db.query(InverterPrediction).filter(
-            InverterPrediction.inverter_id == inverter_id,
-            InverterPrediction.prediction_timestamp == timestamp
-        ).first()
-        
-        if cached_prediction:
-            return cached_prediction
+    # Varsayılan parametreleri ayarla
+    if start_date is None:
+        start_date = datetime.now()
+    
+    if end_date is None:
+        end_date = start_date + timedelta(days=7)
+    
+    print(f"[DEBUG] {inverter_id} için {start_date} - {end_date} aralığında tahmin yapılıyor...")
     
     # Inverter var mı kontrol et
     inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
@@ -53,54 +56,110 @@ async def get_prediction(
     model, model_meta = await load_model(inverter_id, db)
     
     if model is None:
-        # Model yoksa basit bir tahmin yap
-        return await _make_dummy_prediction(inverter_id, timestamp, db)
+        # Model yoksa basit bir tahmin serisi oluştur
+        return await _make_dummy_predictions(inverter_id, start_date, end_date, interval_hours, db)
     
-    # Tahmin için hava durumu verilerini al
-    weather_data = await _get_weather_data_for_prediction(timestamp, db)
+    # Her bir zaman noktası için tahmin yap
+    predictions = []
+    current_time = start_date
     
-    if not weather_data:
-        # Hava durumu verisi yoksa basit bir tahmin yap
-        return await _make_dummy_prediction(inverter_id, timestamp, db)
+    while current_time <= end_date:
+        try:
+            # Eğer önceden hesaplanmış tahmin varsa ve use_cached=True ise, onu kullan
+            if use_cached:
+                cached_prediction = db.query(InverterPrediction).filter(
+                    InverterPrediction.inverter_id == inverter_id,
+                    InverterPrediction.prediction_timestamp == current_time
+                ).first()
+                
+                if cached_prediction:
+                    predictions.append(cached_prediction)
+                    current_time += timedelta(hours=interval_hours)
+                    continue
+            
+            # Tahmin için hava durumu verilerini al
+            weather_data = await _get_weather_data_for_prediction(current_time, db)
+            
+            if not weather_data:
+                # Hava durumu verisi yoksa basit bir tahmin yap
+                dummy_prediction = await _make_dummy_prediction(inverter_id, current_time, db)
+                predictions.append(dummy_prediction)
+                current_time += timedelta(hours=interval_hours)
+                continue
+            
+            # Tahmin için özellikleri hazırla
+            features = _prepare_features(weather_data, current_time)
+            
+            # Modelin beklediği özellikleri al
+            required_features = model_meta.get("metrics", {}).get("features", [])
+            
+            # Gerekli özellikleri içeren DataFrame oluştur
+            feature_df = pd.DataFrame([{k: features.get(k, 0) for k in required_features}])
+            
+            # Tahmin yap
+            predicted_power = float(model.predict(feature_df)[0])
+            
+            # Tahmin güven değeri (şu an için sabit)
+            confidence = 0.9
+            
+            # Tahmin kaydını oluştur ve kaydet
+            prediction = InverterPrediction(
+                inverter_id=inverter_id,
+                timestamp=datetime.utcnow(),
+                prediction_timestamp=current_time,
+                predicted_power_output=predicted_power,
+                model_version=model_meta.get("model_version", "unknown"),
+                confidence=confidence,
+                features=features
+            )
+            
+            db.add(prediction)
+            db.commit()
+            db.refresh(prediction)
+            
+            predictions.append(prediction)
+            
+        except Exception as e:
+            # Hata durumunda basit bir tahmin yap
+            print(f"Tahmin hatası: {str(e)}")
+            dummy_prediction = await _make_dummy_prediction(inverter_id, current_time, db)
+            predictions.append(dummy_prediction)
+        
+        finally:
+            # Bir sonraki zaman noktasına geç
+            current_time += timedelta(hours=interval_hours)
     
-    # Tahmin için özellikleri hazırla
-    features = _prepare_features(weather_data, timestamp)
+    return predictions
+
+# Geriye uyumluluk için eski get_prediction fonksiyonunu da tutalım
+async def get_prediction(
+    inverter_id: int, 
+    timestamp: datetime, 
+    db: Session,
+    use_cached: bool = True
+) -> InverterPrediction:
+    """
+    Belirtilen inverter için tek bir zaman noktası için tahmin yapar.
     
-    # Modeli kullanarak tahmin yap
-    try:
-        # Modelin beklediği özellikleri al
-        required_features = model_meta.get("metrics", {}).get("features", [])
-        
-        # Gerekli özellikleri içeren DataFrame oluştur
-        feature_df = pd.DataFrame([{k: features.get(k, 0) for k in required_features}])
-        
-        # Tahmin yap
-        predicted_power = float(model.predict(feature_df)[0])
-        
-        # Tahmin güven değeri (şu an için sabit)
-        confidence = 0.9
-        
-        # Tahmin kaydını oluştur ve kaydet
-        prediction = InverterPrediction(
-            inverter_id=inverter_id,
-            timestamp=datetime.utcnow(),
-            prediction_timestamp=timestamp,
-            predicted_power_output=predicted_power,
-            model_version=model_meta.get("model_version", "unknown"),
-            confidence=confidence,
-            features=features
-        )
-        
-        db.add(prediction)
-        db.commit()
-        db.refresh(prediction)
-        
-        return prediction
-        
-    except Exception as e:
-        # Hata durumunda basit bir tahmin yap
-        print(f"Tahmin hatası: {str(e)}")
-        return await _make_dummy_prediction(inverter_id, timestamp, db)
+    Args:
+        inverter_id: Tahmin yapılacak inverter ID'si
+        timestamp: Tahmin edilecek zaman
+        db: Veritabanı oturumu
+        use_cached: Eğer varsa, önceden hesaplanmış tahmini kullan
+    
+    Returns:
+        InverterPrediction: Tahmin sonucu
+    """
+    predictions = await get_predictions(
+        inverter_id=inverter_id,
+        start_date=timestamp,
+        end_date=timestamp,
+        interval_hours=1,
+        db=db,
+        use_cached=use_cached
+    )
+    
+    return predictions[0] if predictions else None
 
 async def load_model(inverter_id: int, db: Session) -> tuple:
     """
@@ -214,6 +273,14 @@ def _prepare_features(weather_data: Dict[str, Any], timestamp: datetime) -> Dict
         "dayofweek": timestamp.weekday()
     })
     
+    # Trigonometrik zaman özellikleri ekle
+    features.update({
+        "hour_sin": np.sin(2 * np.pi * timestamp.hour / 24),
+        "hour_cos": np.cos(2 * np.pi * timestamp.hour / 24),
+        "day_sin": np.sin(2 * np.pi * timestamp.month / 12),
+        "day_cos": np.cos(2 * np.pi * timestamp.month / 12)
+    })
+    
     return features
 
 async def _make_dummy_prediction(inverter_id: int, timestamp: datetime, db: Session) -> InverterPrediction:
@@ -281,6 +348,36 @@ async def _make_dummy_prediction(inverter_id: int, timestamp: datetime, db: Sess
     db.refresh(prediction)
     
     return prediction
+
+async def _make_dummy_predictions(
+    inverter_id: int, 
+    start_date: datetime, 
+    end_date: datetime, 
+    interval_hours: int, 
+    db: Session
+) -> List[InverterPrediction]:
+    """
+    Model veya hava durumu verisi yoksa belirli bir aralıkta basit tahminler yapar.
+    
+    Args:
+        inverter_id: Tahmin yapılacak inverter ID'si
+        start_date: Başlangıç zamanı
+        end_date: Bitiş zamanı
+        interval_hours: Saat cinsinden aralık
+        db: Veritabanı oturumu
+        
+    Returns:
+        List[InverterPrediction]: Basit tahmin sonuçları
+    """
+    predictions = []
+    current_time = start_date
+    
+    while current_time <= end_date:
+        prediction = await _make_dummy_prediction(inverter_id, current_time, db)
+        predictions.append(prediction)
+        current_time += timedelta(hours=interval_hours)
+    
+    return predictions
 
 async def train_model(inverter_id: int, db: Session):
     """
@@ -350,37 +447,48 @@ async def train_model(inverter_id: int, db: Session):
 
 async def get_bulk_predictions(
     inverter_ids: List[int], 
-    start_time: datetime, 
-    end_time: datetime, 
-    interval_minutes: int,
-    db: Session
+    start_time: datetime = None, 
+    end_time: datetime = None, 
+    interval_hours: int = 1,
+    db: Session = None
 ) -> Dict[int, List[InverterPrediction]]:
     """
     Birden fazla inverter için belirli bir zaman aralığında tahminler yapar.
     
     Args:
         inverter_ids: Tahmin yapılacak inverter ID'leri
-        start_time: Başlangıç zamanı
-        end_time: Bitiş zamanı
-        interval_minutes: Tahmin aralığı (dakika)
+        start_time: Başlangıç zamanı (varsayılan: şimdiki zaman)
+        end_time: Bitiş zamanı (varsayılan: 7 gün sonrası)
+        interval_hours: Saat cinsinden aralık (varsayılan: 1)
         db: Veritabanı oturumu
         
     Returns:
         Dict: Inverter ID'lerine göre tahminler
     """
+    # Varsayılan parametreleri ayarla
+    if start_time is None:
+        start_time = datetime.now()
+    
+    if end_time is None:
+        end_time = start_time + timedelta(days=7)
+    
     results = {}
     
     # Her inverter için tahminleri hesapla
     for inverter_id in inverter_ids:
-        predictions = []
-        current_time = start_time
-        
-        while current_time <= end_time:
-            prediction = await get_prediction(inverter_id, current_time, db)
-            predictions.append(prediction)
-            current_time += timedelta(minutes=interval_minutes)
-        
-        results[inverter_id] = predictions
+        try:
+            predictions = await get_predictions(
+                inverter_id=inverter_id, 
+                start_date=start_time, 
+                end_date=end_time, 
+                interval_hours=interval_hours, 
+                db=db,
+                use_cached=True
+            )
+            results[inverter_id] = predictions
+        except Exception as e:
+            print(f"Tahmin hatası (inverter_id={inverter_id}): {str(e)}")
+            results[inverter_id] = []
     
     return results 
 
@@ -405,10 +513,10 @@ async def get_active_model(inverter_id: int, db: Session) -> Optional[Model]:
 
 async def generate_predictions(
     inverter_id: int,
-    start_time: datetime,
-    end_time: datetime,
-    interval_minutes: int,
-    db: Session,
+    start_time: datetime = None,
+    end_time: datetime = None,
+    interval_hours: int = 1,
+    db: Session = None,
     use_cached: bool = True
 ) -> List[InverterPrediction]:
     """
@@ -416,34 +524,23 @@ async def generate_predictions(
     
     Args:
         inverter_id: Tahmin yapılacak inverter ID'si
-        start_time: Başlangıç zamanı
-        end_time: Bitiş zamanı
-        interval_minutes: Tahmin aralığı (dakika)
+        start_time: Başlangıç zamanı (varsayılan: şimdiki zaman)
+        end_time: Bitiş zamanı (varsayılan: 7 gün sonrası)
+        interval_hours: Saat cinsinden aralık (varsayılan: 1)
         db: Veritabanı oturumu
         use_cached: Eğer varsa, önceden hesaplanmış tahminleri kullan
         
     Returns:
         List[InverterPrediction]: Tahmin listesi
     """
-    # Zaman aralığındaki tüm noktaları hesapla
-    time_points = []
-    current_time = start_time
-    
-    while current_time <= end_time:
-        time_points.append(current_time)
-        current_time += timedelta(minutes=interval_minutes)
-    
-    # Her zaman noktası için tahmin yap
-    predictions = []
-    
-    for timestamp in time_points:
-        try:
-            prediction = await get_prediction(inverter_id, timestamp, db, use_cached)
-            predictions.append(prediction)
-        except Exception as e:
-            print(f"Tahmin hatası ({inverter_id}, {timestamp}): {str(e)}")
-    
-    return predictions
+    return await get_predictions(
+        inverter_id=inverter_id,
+        start_date=start_time,
+        end_date=end_time,
+        interval_hours=interval_hours,
+        db=db,
+        use_cached=use_cached
+    )
 
 async def evaluate_model_on_historical_data(
     inverter_id: int,
