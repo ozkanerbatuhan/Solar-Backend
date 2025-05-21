@@ -1,3 +1,4 @@
+from fastapi import logger
 import httpx
 import json
 from typing import Dict, Any, Optional
@@ -105,6 +106,7 @@ async def fetch_weather_forecast(
         response = await client.get(SOLAR_RADIATION_ENDPOINT, params=params)
         response.raise_for_status()
         data = response.json()
+        logger.info(f"Hava durumu verisi çekildi:----------------------------")
         
     if save_to_db:
         await _save_weather_forecast(data, db)

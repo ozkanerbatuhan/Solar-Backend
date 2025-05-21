@@ -51,7 +51,7 @@ async def get_predictions(
     if end_date is None:
         end_date = start_date + timedelta(days=7)
     
-    logger.info(f"[INFO] {inverter_id} için {start_date} - {end_date} aralığında tahmin yapılıyor...")
+    
     
     # Inverter var mı kontrol et
     try:
@@ -67,7 +67,7 @@ async def get_predictions(
     # Aktif modeli yükle
     try:
         model, model_meta = await load_model(inverter_id, db)
-        logger.info(f"Model yüklendi: {model_meta}")
+       
     except Exception as e:
         logger.error(f"Model yükleme hatası: {str(e)}")
         if db and db.is_active:
@@ -113,9 +113,9 @@ async def get_predictions(
                 dummy_count += 1
                 transaction_success = True
             else:
-                # Tahmin için özellikleri hazırla
+                logger.info(f"Hava durumu verisi bulundu:----------------------------")
                 features = _prepare_features(weather_data, current_time)
-                
+                logger.info(f"Özellikler hazırlandı:----------------------------")
                 # Modelin beklediği özellikleri al
                 required_features = model_meta.get("metrics", {}).get("features", [])
                 
@@ -125,14 +125,15 @@ async def get_predictions(
                 else:
                     # Özellikler belirtilmemişse, tüm özellikleri kullan
                     feature_df = pd.DataFrame([features])
-                
+                logger.info(f"Özellikler DataFrame oluşturuldu:----------------------------")
                 # Tahmin yap
                 predicted_power = float(model.predict(feature_df)[0])
-                
+                logger.info(f"Tahmin yapıldı:----------------------------")
                 # Tahmin güven değeri (şu an için sabit)
                 confidence = 0.9
                 
                 # Tahmin kaydını oluştur ve kaydet
+                logger.info(f"Tahmin kaydı oluşturuluyor:----------------------------")
                 prediction = InverterPrediction(
                     inverter_id=inverter_id,
                     timestamp=datetime.utcnow(),
@@ -146,9 +147,10 @@ async def get_predictions(
                 db.add(prediction)
                 db.commit()
                 db.refresh(prediction)
+                logger.info(f"Tahmin kaydedildi:----------------------------")
                 transaction_success = True
                 real_count += 1
-                
+                logger.info(f"Tahmin listesine eklendi:----------------------------")
                 predictions.append(prediction)
             
         except Exception as e:
@@ -292,11 +294,11 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
             logger.info(f"Veritabanında {timestamp} zamanı için hava durumu verisi bulunamadı. API'den çekiliyor...")
             
             # Inverter lokasyon bilgilerini al (burada örnek değerler, gerçek proje için ayarlanmalı)
-            latitude = 41.0082  # İstanbul
-            longitude = 28.9784
+            latitude = 37.5704328 # İstanbul
+            longitude = 34.1371146
             
             # Sadece gerekli gün için tahmin çek (bugün ve yarın)
-            forecast_days = max(1, (timestamp.date() - datetime.now().date()).days + 1)
+            forecast_days = 7  # Bugün ve sonraki 7 gün için tahmin çek
             
             # Hava durumu verisini API'den çek
             try:
