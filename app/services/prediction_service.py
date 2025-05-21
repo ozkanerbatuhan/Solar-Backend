@@ -66,6 +66,7 @@ async def get_predictions(
     # Aktif modeli yükle
     try:
         model, model_meta = await load_model(inverter_id, db)
+        logger.info(f"Model yüklendi: {model_meta}, {model}")
     except Exception as e:
         logger.error(f"Model yükleme hatası: {str(e)}")
         if db and db.is_active:
@@ -74,6 +75,7 @@ async def get_predictions(
     
     if model is None:
         # Model yoksa basit bir tahmin serisi oluştur
+        logger.info(f"Model yok, basit tahmin serisi oluşturuluyor...")
         return await _make_dummy_predictions(inverter_id, start_date, end_date, interval_hours, db)
     
     # Her bir zaman noktası için tahmin yap
