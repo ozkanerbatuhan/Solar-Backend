@@ -533,6 +533,7 @@ async def get_bulk_predictions(
     start_time: datetime = None, 
     end_time: datetime = None, 
     interval_hours: int = 1,
+    interval_minutes: int = None,
     db: Session = None
 ) -> Dict[int, List[InverterPrediction]]:
     """
@@ -543,6 +544,7 @@ async def get_bulk_predictions(
         start_time: Başlangıç zamanı (varsayılan: şimdiki zaman)
         end_time: Bitiş zamanı (varsayılan: 7 gün sonrası)
         interval_hours: Saat cinsinden aralık (varsayılan: 1)
+        interval_minutes: Dakika cinsinden aralık (varsa, interval_hours yerine kullanılır)
         db: Veritabanı oturumu
         
     Returns:
@@ -554,6 +556,11 @@ async def get_bulk_predictions(
     
     if end_time is None:
         end_time = start_time + timedelta(days=7)
+    
+    # Dakika parametresi varsa, saate dönüştür
+    if interval_minutes is not None:
+        interval_hours = interval_minutes / 60
+        logger.info(f"interval_minutes={interval_minutes} değeri interval_hours={interval_hours} olarak dönüştürüldü")
     
     results = {}
     

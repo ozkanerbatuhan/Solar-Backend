@@ -266,44 +266,39 @@ async def predict_bulk_inverter_output(
     db: Session = Depends(get_db)
 ):
     """
-    Belirtilen inverterler için belirli bir zaman aralığında toplu tahmin yapar.
-    
-    Args:
-        inverter_ids: Tahmin yapılacak inverter ID'leri
-        start_time: Başlangıç zamanı
-        end_time: Bitiş zamanı
-        interval_minutes: Tahmin aralığı (dakika)
-        db: Veritabanı oturumu
+    Birden fazla inverter için toplu tahmin yapar
     """
     try:
-        # Zamanların uygun olduğunu kontrol et
-        if start_time >= end_time:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Başlangıç zamanı bitiş zamanından küçük olmalıdır"
-            )
-        
-        # Tahmin et
+        # Prediction service'e interval_minutes parametresini doğrudan geçir
         predictions = await get_bulk_predictions(
-            inverter_ids, start_time, end_time, interval_minutes, db
+            inverter_ids=inverter_ids,
+            start_time=start_time,
+            end_time=end_time,
+            interval_minutes=interval_minutes,  # Dakika cinsinden değeri doğrudan gönder
+            db=db
         )
         
-        return {
-            "success": True,
-            "inverter_count": len(inverter_ids),
-            "time_range": {
-                "start": start_time,
-                "end": end_time,
-                "interval_minutes": interval_minutes
-            },
-            "predictions": predictions
-        }
-    except HTTPException:
-        raise
+        # Tahminleri JSON serileştirilebilir hale getir
+        formatted_predictions = {}
+        for inverter_id, inverter_predictions in predictions.items():
+            formatted_predictions[inverter_id] = [
+                {
+                    "timestamp": pred.timestamp.isoformat() if pred.timestamp else None,
+                    "prediction_timestamp": pred.prediction_timestamp.isoformat() if pred.prediction_timestamp else None,
+                    "predicted_power": pred.predicted_power_output,
+                    "model_version": pred.model_version,
+                    "confidence": pred.confidence,
+                    "features": pred.features
+                }
+                for pred in inverter_predictions
+            ]
+        
+        return formatted_predictions
+    
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Toplu tahmin yapılırken hata oluştu: {str(e)}"
+            status_code=500,
+            detail=f"Tahmin hatası: {str(e)}"
         )
 
 @router.get("/logs/{model_version}", response_model=ModelLogResponse)
