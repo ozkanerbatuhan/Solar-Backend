@@ -12,6 +12,10 @@ from app.models.inverter import InverterPrediction, Inverter
 from app.models.model import Model
 from app.models.weather import WeatherForecast
 from app.core.config import settings
+import logging
+
+# Log yapılandırması
+logger = logging.getLogger(__name__)
 
 # Modellerin kaydedileceği klasör
 MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ml", "models")
@@ -45,15 +49,27 @@ async def get_predictions(
     if end_date is None:
         end_date = start_date + timedelta(days=7)
     
-    print(f"[DEBUG] {inverter_id} için {start_date} - {end_date} aralığında tahmin yapılıyor...")
+    logger.info(f"[INFO] {inverter_id} için {start_date} - {end_date} aralığında tahmin yapılıyor...")
     
     # Inverter var mı kontrol et
-    inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
-    if inverter is None:
-        raise ValueError(f"ID: {inverter_id} olan inverter bulunamadı")
+    try:
+        inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
+        if inverter is None:
+            raise ValueError(f"ID: {inverter_id} olan inverter bulunamadı")
+    except Exception as e:
+        logger.error(f"Inverter sorgulama hatası: {str(e)}")
+        if db and db.is_active:
+            db.rollback()
+        raise
     
     # Aktif modeli yükle
-    model, model_meta = await load_model(inverter_id, db)
+    try:
+        model, model_meta = await load_model(inverter_id, db)
+    except Exception as e:
+        logger.error(f"Model yükleme hatası: {str(e)}")
+        if db and db.is_active:
+            db.rollback()
+        model, model_meta = None, None
     
     if model is None:
         # Model yoksa basit bir tahmin serisi oluştur
@@ -64,6 +80,9 @@ async def get_predictions(
     current_time = start_date
     
     while current_time <= end_date:
+        prediction = None
+        transaction_success = False
+        
         try:
             # Eğer önceden hesaplanmış tahmin varsa ve use_cached=True ise, onu kullan
             if use_cached:
@@ -82,8 +101,9 @@ async def get_predictions(
             
             if not weather_data:
                 # Hava durumu verisi yoksa basit bir tahmin yap
-                dummy_prediction = await _make_dummy_prediction(inverter_id, current_time, db)
-                predictions.append(dummy_prediction)
+                prediction = await _make_dummy_prediction(inverter_id, current_time, db)
+                predictions.append(prediction)
+                transaction_success = True
                 current_time += timedelta(hours=interval_hours)
                 continue
             
@@ -116,14 +136,25 @@ async def get_predictions(
             db.add(prediction)
             db.commit()
             db.refresh(prediction)
+            transaction_success = True
             
             predictions.append(prediction)
             
         except Exception as e:
-            # Hata durumunda basit bir tahmin yap
-            print(f"Tahmin hatası: {str(e)}")
-            dummy_prediction = await _make_dummy_prediction(inverter_id, current_time, db)
-            predictions.append(dummy_prediction)
+            # Veritabanı işlemi başarısız olduysa geri al
+            if not transaction_success and db and db.is_active:
+                db.rollback()
+                
+            logger.error(f"Tahmin hatası: {str(e)}")
+            
+            try:
+                # Hata durumunda basit bir tahmin yap
+                dummy_prediction = await _make_dummy_prediction(inverter_id, current_time, db)
+                predictions.append(dummy_prediction)
+            except Exception as dummy_err:
+                logger.error(f"Dummy tahmin hatası: {str(dummy_err)}")
+                if db and db.is_active:
+                    db.rollback()
         
         finally:
             # Bir sonraki zaman noktasına geç
@@ -150,16 +181,22 @@ async def get_prediction(
     Returns:
         InverterPrediction: Tahmin sonucu
     """
-    predictions = await get_predictions(
-        inverter_id=inverter_id,
-        start_date=timestamp,
-        end_date=timestamp,
-        interval_hours=1,
-        db=db,
-        use_cached=use_cached
-    )
-    
-    return predictions[0] if predictions else None
+    try:
+        predictions = await get_predictions(
+            inverter_id=inverter_id,
+            start_date=timestamp,
+            end_date=timestamp,
+            interval_hours=1,
+            db=db,
+            use_cached=use_cached
+        )
+        
+        return predictions[0] if predictions else None
+    except Exception as e:
+        logger.error(f"Tek nokta tahmin hatası: {str(e)}")
+        if db and db.is_active:
+            db.rollback()
+        raise
 
 async def load_model(inverter_id: int, db: Session) -> tuple:
     """
@@ -172,32 +209,32 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
     Returns:
         tuple: (model, model_meta) - Yüklenen model ve meta verileri
     """
-    # Inverter için aktif modeli kontrol et
-    active_model = db.query(Model).filter(
-        Model.inverter_id == inverter_id,
-        Model.is_active == True
-    ).first()
-    
-    if active_model is None:
-        return None, None
-    
-    # Model dosyasının yolunu oluştur
-    model_path = active_model.model_path
-    if not model_path:
-        return None, None
-    
-    # Tam dosya yolunu oluştur
-    full_model_path = os.path.join(MODELS_DIR, model_path)
-    
-    # Model meta verisi için dosya yolunu oluştur
-    model_version = active_model.version
-    meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
-    
-    # Modelin var olup olmadığını kontrol et
-    if not os.path.exists(full_model_path):
-        return None, None
-    
     try:
+        # Inverter için aktif modeli kontrol et
+        active_model = db.query(Model).filter(
+            Model.inverter_id == inverter_id,
+            Model.is_active == True
+        ).first()
+        
+        if active_model is None:
+            return None, None
+        
+        # Model dosyasının yolunu oluştur
+        model_path = active_model.model_path
+        if not model_path:
+            return None, None
+        
+        # Tam dosya yolunu oluştur
+        full_model_path = os.path.join(MODELS_DIR, model_path)
+        
+        # Model meta verisi için dosya yolunu oluştur
+        model_version = active_model.version
+        meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
+        
+        # Modelin var olup olmadığını kontrol et
+        if not os.path.exists(full_model_path):
+            return None, None
+        
         # Modeli yükle
         model = joblib.load(full_model_path)
         
@@ -210,7 +247,9 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
         return model, model_meta
     
     except Exception as e:
-        print(f"Model yükleme hatası: {str(e)}")
+        logger.error(f"Model yükleme hatası: {str(e)}")
+        if db and db.is_active:
+            db.rollback()
         return None, None
 
 async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> Dict[str, Any]:
@@ -224,32 +263,38 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
     Returns:
         Dict: Hava durumu verileri
     """
-    # Tahmin zamanına en yakın hava durumu verisini bul
-    weather_data = db.query(WeatherForecast).filter(
-        WeatherForecast.forecast_timestamp <= timestamp + timedelta(hours=1),
-        WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
-    ).order_by(
-        # En yakın zaman damgasına göre sırala
-        db.func.abs(db.func.extract('epoch', WeatherForecast.forecast_timestamp) - 
-                   db.func.extract('epoch', timestamp))
-    ).first()
-    
-    if not weather_data:
+    try:
+        # Tahmin zamanına en yakın hava durumu verisini bul
+        weather_data = db.query(WeatherForecast).filter(
+            WeatherForecast.forecast_timestamp <= timestamp + timedelta(hours=1),
+            WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
+        ).order_by(
+            # En yakın zaman damgasına göre sırala
+            db.func.abs(db.func.extract('epoch', WeatherForecast.forecast_timestamp) - 
+                       db.func.extract('epoch', timestamp))
+        ).first()
+        
+        if not weather_data:
+            return None
+        
+        # Hava durumu verilerini sözlük olarak döndür
+        return {
+            "temperature": weather_data.temperature,
+            "shortwave_radiation": weather_data.shortwave_radiation,
+            "direct_radiation": weather_data.direct_radiation,
+            "diffuse_radiation": weather_data.diffuse_radiation,
+            "direct_normal_irradiance": weather_data.direct_normal_irradiance,
+            "global_tilted_irradiance": weather_data.global_tilted_irradiance,
+            "terrestrial_radiation": weather_data.terrestrial_radiation,
+            "relative_humidity": weather_data.relative_humidity,
+            "wind_speed": weather_data.wind_speed,
+            "visibility": weather_data.visibility
+        }
+    except Exception as e:
+        logger.error(f"Hava durumu verisi alma hatası: {str(e)}")
+        if db and db.is_active:
+            db.rollback()
         return None
-    
-    # Hava durumu verilerini sözlük olarak döndür
-    return {
-        "temperature": weather_data.temperature,
-        "shortwave_radiation": weather_data.shortwave_radiation,
-        "direct_radiation": weather_data.direct_radiation,
-        "diffuse_radiation": weather_data.diffuse_radiation,
-        "direct_normal_irradiance": weather_data.direct_normal_irradiance,
-        "global_tilted_irradiance": weather_data.global_tilted_irradiance,
-        "terrestrial_radiation": weather_data.terrestrial_radiation,
-        "relative_humidity": weather_data.relative_humidity,
-        "wind_speed": weather_data.wind_speed,
-        "visibility": weather_data.visibility
-    }
 
 def _prepare_features(weather_data: Dict[str, Any], timestamp: datetime) -> Dict[str, Any]:
     """
@@ -295,59 +340,75 @@ async def _make_dummy_prediction(inverter_id: int, timestamp: datetime, db: Sess
     Returns:
         InverterPrediction: Basit tahmin sonucu
     """
-    import random
-    
-    # Saat bazında basit bir tahmin yap (gündüz daha yüksek, gece daha düşük)
-    hour = timestamp.hour
-    
-    # Gece (0-6) ve akşam (18-23) saatleri için düşük değer
-    if hour < 6 or hour > 18:
-        base_power = random.uniform(0, 10)
-    # Sabah (6-10) ve öğleden sonra (15-18) için orta değer
-    elif (hour >= 6 and hour < 10) or (hour >= 15 and hour < 18):
-        base_power = random.uniform(10, 50)
-    # Öğle saatleri (10-15) için yüksek değer
-    else:
-        base_power = random.uniform(50, 100)
-    
-    # Mevsimsel etki (yaz aylarında daha yüksek)
-    month = timestamp.month
-    if month in [6, 7, 8]:  # Yaz
-        seasonal_factor = 1.2
-    elif month in [3, 4, 5, 9, 10, 11]:  # İlkbahar ve sonbahar
-        seasonal_factor = 1.0
-    else:  # Kış
-        seasonal_factor = 0.8
-    
-    # Tahmin değerini hesapla
-    predicted_power = base_power * seasonal_factor
-    
-    # Dummy özellikler
-    features = {
-        "timestamp": timestamp.isoformat(),
-        "hour": hour,
-        "day": timestamp.day,
-        "month": month,
-        "dayofweek": timestamp.weekday(),
-        "is_dummy": True
-    }
-    
-    # Tahmin kaydını oluştur ve kaydet
-    prediction = InverterPrediction(
-        inverter_id=inverter_id,
-        timestamp=datetime.utcnow(),
-        prediction_timestamp=timestamp,
-        predicted_power_output=predicted_power,
-        model_version="dummy-model",
-        confidence=0.5,  # Düşük güven
-        features=features
-    )
-    
-    db.add(prediction)
-    db.commit()
-    db.refresh(prediction)
-    
-    return prediction
+    try:
+        import random
+        
+        # Saat bazında basit bir tahmin yap (gündüz daha yüksek, gece daha düşük)
+        hour = timestamp.hour
+        
+        # Gece (0-6) ve akşam (18-23) saatleri için düşük değer
+        if hour < 6 or hour > 18:
+            base_power = random.uniform(0, 10)
+        # Sabah (6-10) ve öğleden sonra (15-18) için orta değer
+        elif (hour >= 6 and hour < 10) or (hour >= 15 and hour < 18):
+            base_power = random.uniform(10, 50)
+        # Öğle saatleri (10-15) için yüksek değer
+        else:
+            base_power = random.uniform(50, 100)
+        
+        # Mevsimsel etki (yaz aylarında daha yüksek)
+        month = timestamp.month
+        if month in [6, 7, 8]:  # Yaz
+            seasonal_factor = 1.2
+        elif month in [3, 4, 5, 9, 10, 11]:  # İlkbahar ve sonbahar
+            seasonal_factor = 1.0
+        else:  # Kış
+            seasonal_factor = 0.8
+        
+        # Tahmin değerini hesapla
+        predicted_power = base_power * seasonal_factor
+        
+        # Dummy özellikler
+        features = {
+            "timestamp": timestamp.isoformat(),
+            "hour": hour,
+            "day": timestamp.day,
+            "month": month,
+            "dayofweek": timestamp.weekday(),
+            "is_dummy": True
+        }
+        
+        # Tahmin kaydını oluştur ve kaydet
+        prediction = InverterPrediction(
+            inverter_id=inverter_id,
+            timestamp=datetime.utcnow(),
+            prediction_timestamp=timestamp,
+            predicted_power_output=predicted_power,
+            model_version="dummy-model",
+            confidence=0.5,  # Düşük güven
+            features=features
+        )
+        
+        db.add(prediction)
+        db.commit()
+        db.refresh(prediction)
+        
+        return prediction
+    except Exception as e:
+        logger.error(f"Dummy tahmin hatası: {str(e)}")
+        if db and db.is_active:
+            db.rollback()
+        
+        # En son çare - DB'ye yazmadan dummy bir nesne döndür
+        return InverterPrediction(
+            inverter_id=inverter_id,
+            timestamp=datetime.utcnow(),
+            prediction_timestamp=timestamp,
+            predicted_power_output=10.0,  # Sabit düşük değer
+            model_version="emergency-dummy-model",
+            confidence=0.1,  # Çok düşük güven
+            features={"is_dummy": True, "is_emergency": True}
+        )
 
 async def _make_dummy_predictions(
     inverter_id: int, 
@@ -373,9 +434,28 @@ async def _make_dummy_predictions(
     current_time = start_date
     
     while current_time <= end_date:
-        prediction = await _make_dummy_prediction(inverter_id, current_time, db)
-        predictions.append(prediction)
-        current_time += timedelta(hours=interval_hours)
+        try:
+            prediction = await _make_dummy_prediction(inverter_id, current_time, db)
+            predictions.append(prediction)
+        except Exception as e:
+            logger.error(f"Dummy tahmin oluşturma hatası: {str(e)}")
+            if db and db.is_active:
+                db.rollback()
+            
+            # En son çare - DB'ye yazmadan dummy bir nesne oluştur
+            emergency_pred = InverterPrediction(
+                inverter_id=inverter_id,
+                timestamp=datetime.utcnow(),
+                prediction_timestamp=current_time,
+                predicted_power_output=10.0,
+                model_version="emergency-dummy-model",
+                confidence=0.1,
+                features={"is_dummy": True, "is_emergency": True}
+            )
+            predictions.append(emergency_pred)
+            
+        finally:
+            current_time += timedelta(hours=interval_hours)
     
     return predictions
 
@@ -487,10 +567,12 @@ async def get_bulk_predictions(
             )
             results[inverter_id] = predictions
         except Exception as e:
-            print(f"Tahmin hatası (inverter_id={inverter_id}): {str(e)}")
+            logger.error(f"Tahmin hatası (inverter_id={inverter_id}): {str(e)}")
+            if db and db.is_active:
+                db.rollback()
             results[inverter_id] = []
     
-    return results 
+    return results
 
 async def get_active_model(inverter_id: int, db: Session) -> Optional[Model]:
     """

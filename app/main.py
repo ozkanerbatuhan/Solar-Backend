@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 from sqlalchemy import text
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 # Veritabanı ve modeller
 from app.db.database import engine, Base, get_db
@@ -22,6 +24,46 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+def ensure_database_exists():
+    """Veritabanının var olduğundan emin ol, yoksa oluştur"""
+    try:
+        # PostgreSQL config bilgilerini settings'ten al
+        db_user = settings.POSTGRES_USER
+        db_password = settings.POSTGRES_PASSWORD
+        db_host = settings.POSTGRES_SERVER
+        db_port = settings.POSTGRES_PORT
+        db_name = settings.POSTGRES_DB
+        
+        # Postgres root veritabanına bağlan
+        conn = psycopg2.connect(
+            dbname="postgres",  # root DB
+            user=db_user,
+            password=db_password,
+            host=db_host,
+            port=db_port
+        )
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cur = conn.cursor()
+        
+        # Veritabanı var mı kontrol et
+        cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
+        exists = cur.fetchone()
+        
+        # Yoksa oluştur
+        if not exists:
+            cur.execute(f"CREATE DATABASE {db_name};")
+            logger.info(f"✔️ Veritabanı oluşturuldu: {db_name}")
+        else:
+            logger.info(f"✅ Veritabanı zaten var: {db_name}")
+        
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ DB kontrol hatası: {e}")
+
+# Veritabanının var olduğundan emin ol
+ensure_database_exists()
 
 # Veritabanı tablolarını oluştur
 try:
@@ -70,6 +112,9 @@ async def root():
 async def health_check():
     """Sağlık kontrolü endpoint'i"""
     try:
+        # Önce veritabanı varlığını kontrol et
+        ensure_database_exists()
+        
         # Bağlantı durumunu kontrol etme
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
