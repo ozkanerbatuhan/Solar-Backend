@@ -52,7 +52,6 @@ async def get_predictions(
         end_date = start_date + timedelta(days=7)
     
     
-    
     # Inverter var mı kontrol et
     try:
         inverter = db.query(Inverter).filter(Inverter.id == inverter_id).first()
@@ -67,7 +66,7 @@ async def get_predictions(
     # Aktif modeli yükle
     try:
         model, model_meta = await load_model(inverter_id, db)
-       
+        
     except Exception as e:
         logger.error(f"Model yükleme hatası: {str(e)}")
         if db and db.is_active:
@@ -113,9 +112,9 @@ async def get_predictions(
                 dummy_count += 1
                 transaction_success = True
             else:
-                logger.info(f"Hava durumu verisi bulundu:----------------------------")
+                # Tahmin için özellikleri hazırla
                 features = _prepare_features(weather_data, current_time)
-                logger.info(f"Özellikler hazırlandı:----------------------------")
+                
                 # Modelin beklediği özellikleri al
                 required_features = model_meta.get("metrics", {}).get("features", [])
                 
@@ -125,15 +124,14 @@ async def get_predictions(
                 else:
                     # Özellikler belirtilmemişse, tüm özellikleri kullan
                     feature_df = pd.DataFrame([features])
-                logger.info(f"Özellikler DataFrame oluşturuldu:----------------------------")
+                
                 # Tahmin yap
                 predicted_power = float(model.predict(feature_df)[0])
-                logger.info(f"Tahmin yapıldı:----------------------------")
+                
                 # Tahmin güven değeri (şu an için sabit)
                 confidence = 0.9
                 
                 # Tahmin kaydını oluştur ve kaydet
-                logger.info(f"Tahmin kaydı oluşturuluyor:----------------------------")
                 prediction = InverterPrediction(
                     inverter_id=inverter_id,
                     timestamp=datetime.utcnow(),
@@ -147,10 +145,9 @@ async def get_predictions(
                 db.add(prediction)
                 db.commit()
                 db.refresh(prediction)
-                logger.info(f"Tahmin kaydedildi:----------------------------")
                 transaction_success = True
                 real_count += 1
-                logger.info(f"Tahmin listesine eklendi:----------------------------")
+                
                 predictions.append(prediction)
             
         except Exception as e:
@@ -174,7 +171,7 @@ async def get_predictions(
             # Bir sonraki zaman noktasına geç
             current_time += timedelta(hours=interval_hours)
     
-    logger.info(f"Tahmin tamamlandı: {len(predictions)} tahmin, {real_count} gerçek model, {dummy_count} dummy model")
+    logger.info(f"{inverter_id} için tahmin tamamlandı: {len(predictions)} tahmin")
     return predictions
 
 # Geriye uyumluluk için eski get_prediction fonksiyonunu da tutalım
@@ -291,42 +288,56 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
         
         # Eğer veritabanında hava durumu verisi yoksa, API'den çek
         if not weather_data:
-            logger.info(f"Veritabanında {timestamp} zamanı için hava durumu verisi bulunamadı. API'den çekiliyor...")
+            # Önce o gün için veritabanında hiç veri var mı kontrol et
+            # Bu şekilde API'ye her eksik saat için değil, sadece günlük bazda istek yapılır
+            start_of_day = datetime(timestamp.year, timestamp.month, timestamp.day)
+            end_of_day = start_of_day + timedelta(days=1)
             
-            # Inverter lokasyon bilgilerini al (burada örnek değerler, gerçek proje için ayarlanmalı)
-            latitude = 37.5704328 # İstanbul
-            longitude = 34.1371146
+            existing_data_count = db.query(WeatherForecast).filter(
+                WeatherForecast.forecast_timestamp >= start_of_day,
+                WeatherForecast.forecast_timestamp < end_of_day
+            ).count()
             
-            # Sadece gerekli gün için tahmin çek (bugün ve yarın)
-            forecast_days = 7  # Bugün ve sonraki 7 gün için tahmin çek
-            
-            # Hava durumu verisini API'den çek
-            try:
-                # API'den veri çek
-                weather_response = await fetch_weather_forecast(
-                    latitude=latitude,
-                    longitude=longitude,
-                    forecast_days=forecast_days,
-                    db=db,
-                    save_to_db=True
-                )
+            if existing_data_count == 0:
+                logger.info(f"{timestamp.date()} günü için hava durumu verisi bulunamadı. API'den çekiliyor...")
                 
-                logger.info(f"API'den hava durumu verisi başarıyla çekildi ve veritabanına kaydedildi.")
+                # Inverter lokasyon bilgilerini al (burada örnek değerler, gerçek proje için ayarlanmalı)
+                latitude = 37.5704328 # Mersin
+                longitude = 34.1371146
                 
-                # Veritabanına kaydedilen veriyi tekrar sorgula
-                weather_data = db.query(WeatherForecast).filter(
-                    WeatherForecast.forecast_timestamp <= timestamp + timedelta(hours=1),
-                    WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
-                ).order_by(
-                    func.abs(func.extract('epoch', WeatherForecast.forecast_timestamp) - 
-                           func.extract('epoch', timestamp))
-                ).first()
+                # Sadece gerekli gün için tahmin çek
+                forecast_days = 7  # Bugün ve sonraki 7 gün için tahmin çek
                 
-                if not weather_data:
-                    logger.warning(f"API'den veri çekildi ancak istenen zaman ({timestamp}) için veri bulunamadı.")
+                # Hava durumu verisini API'den çek
+                try:
+                    # API'den veri çek
+                    weather_response = await fetch_weather_forecast(
+                        latitude=latitude,
+                        longitude=longitude,
+                        forecast_days=forecast_days,
+                        db=db,
+                        save_to_db=True
+                    )
+                    
+                    logger.info(f"API'den hava durumu verisi başarıyla çekildi ve veritabanına kaydedildi.")
+                    
+                    # Veritabanına kaydedilen veriyi tekrar sorgula
+                    weather_data = db.query(WeatherForecast).filter(
+                        WeatherForecast.forecast_timestamp <= timestamp + timedelta(hours=1),
+                        WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
+                    ).order_by(
+                        func.abs(func.extract('epoch', WeatherForecast.forecast_timestamp) - 
+                               func.extract('epoch', timestamp))
+                    ).first()
+                    
+                    if not weather_data:
+                        logger.warning(f"API'den veri çekildi ancak istenen zaman ({timestamp}) için veri bulunamadı.")
+                        return None
+                except Exception as api_error:
+                    logger.error(f"API'den hava durumu verisi çekilirken hata: {str(api_error)}")
                     return None
-            except Exception as api_error:
-                logger.error(f"API'den hava durumu verisi çekilirken hata: {str(api_error)}")
+            else:
+                logger.info(f"{timestamp.date()} günü için DB'de {existing_data_count} kayıt var ama tam saat için eşleşme bulunamadı.")
                 return None
         
         # Hava durumu verilerini sözlük olarak döndür
