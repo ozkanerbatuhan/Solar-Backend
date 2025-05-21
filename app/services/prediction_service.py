@@ -302,6 +302,7 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
             
             # Hava durumu verisini API'den çek
             try:
+                # API'den veri çek
                 weather_response = await fetch_weather_forecast(
                     latitude=latitude,
                     longitude=longitude,

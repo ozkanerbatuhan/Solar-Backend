@@ -1,12 +1,15 @@
-from fastapi import logger
 import httpx
 import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+import logging
 
 from app.models.weather import WeatherData, WeatherForecast
 from app.schemas.weather import OpenMeteoResponse
+
+# Logger yapılandırması
+logger = logging.getLogger(__name__)
 
 # Open-meteo API endpoint'leri
 OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1"
@@ -58,15 +61,21 @@ async def fetch_current_weather(
         "timezone": "auto"
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.get(SOLAR_RADIATION_ENDPOINT, params=params)
-        response.raise_for_status()
-        data = response.json()
+    try:
+        logger.info(f"OpenMeteo API'sine istek gönderiliyor: {params}")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(SOLAR_RADIATION_ENDPOINT, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+        if save_to_db:
+            saved_rows = await _save_weather_data(data, db, is_forecast=False)
+            logger.info(f"{saved_rows} adet hava durumu verisi kaydedildi")
         
-    if save_to_db:
-        await _save_weather_data(data, db, is_forecast=False)
-    
-    return OpenMeteoResponse(data=data)
+        return OpenMeteoResponse(data=data)
+    except Exception as e:
+        logger.error(f"Hava durumu verisi çekilirken hata: {str(e)}")
+        raise
 
 async def fetch_weather_forecast(
     latitude: float, 
@@ -102,16 +111,21 @@ async def fetch_weather_forecast(
         "timezone": "auto"
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.get(SOLAR_RADIATION_ENDPOINT, params=params)
-        response.raise_for_status()
-        data = response.json()
-        logger.info(f"Hava durumu verisi çekildi:----------------------------")
+    try:
+        logger.info(f"OpenMeteo API'sine tahmin isteği gönderiliyor: lat={latitude}, lon={longitude}, günler={forecast_days}")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(SOLAR_RADIATION_ENDPOINT, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+        if save_to_db:
+            saved_rows = await _save_weather_forecast(data, db)
+            logger.info(f"{saved_rows} adet hava durumu tahmini veritabanına kaydedildi")
         
-    if save_to_db:
-        await _save_weather_forecast(data, db)
-    
-    return OpenMeteoResponse(data=data)
+        return OpenMeteoResponse(data=data)
+    except Exception as e:
+        logger.error(f"Hava durumu tahmini çekilirken hata: {str(e)}")
+        raise
 
 async def fetch_historical_weather(
     latitude: float,
@@ -145,15 +159,21 @@ async def fetch_historical_weather(
         "timezone": "auto"
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.get(HISTORICAL_ENDPOINT, params=params)
-        response.raise_for_status()
-        data = response.json()
+    try:
+        logger.info(f"OpenMeteo API'sine geçmiş veri isteği gönderiliyor: {start_date} - {end_date}")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(HISTORICAL_ENDPOINT, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+        if save_to_db:
+            saved_rows = await _save_weather_data(data, db, is_forecast=False)
+            logger.info(f"{saved_rows} adet geçmiş hava durumu verisi kaydedildi")
         
-    if save_to_db:
-        await _save_weather_data(data, db, is_forecast=False)
-    
-    return OpenMeteoResponse(data=data)
+        return OpenMeteoResponse(data=data)
+    except Exception as e:
+        logger.error(f"Geçmiş hava durumu verisi çekilirken hata: {str(e)}")
+        raise
 
 async def _save_weather_data(data: Dict[str, Any], db: Session, is_forecast: bool = False) -> int:
     """
@@ -168,6 +188,7 @@ async def _save_weather_data(data: Dict[str, Any], db: Session, is_forecast: boo
         Kaydedilen satır sayısı
     """
     if "hourly" not in data:
+        logger.warning("API yanıtında 'hourly' verisi bulunamadı")
         return 0
     
     hourly_data = data["hourly"]
@@ -175,6 +196,7 @@ async def _save_weather_data(data: Dict[str, Any], db: Session, is_forecast: boo
     
     # Tarih-saat verileri
     time_values = hourly_data.get("time", [])
+    logger.info(f"Toplam {len(time_values)} adet hava durumu kaydı işlenecek")
     
     for i, time_str in enumerate(time_values):
         # ISO format tarihi datetime'a çevir
@@ -202,8 +224,10 @@ async def _save_weather_data(data: Dict[str, Any], db: Session, is_forecast: boo
     
     try:
         db.commit()
+        logger.info(f"{saved_count} adet hava durumu verisi veritabanına başarıyla kaydedildi")
     except Exception as e:
         db.rollback()
+        logger.error(f"Hava durumu verileri kaydedilirken hata: {str(e)}")
         raise e
     
     return saved_count
@@ -220,6 +244,7 @@ async def _save_weather_forecast(data: Dict[str, Any], db: Session) -> int:
         Kaydedilen satır sayısı
     """
     if "hourly" not in data:
+        logger.warning("API yanıtında 'hourly' verisi bulunamadı")
         return 0
     
     hourly_data = data["hourly"]
@@ -228,6 +253,7 @@ async def _save_weather_forecast(data: Dict[str, Any], db: Session) -> int:
     
     # Tarih-saat verileri
     time_values = hourly_data.get("time", [])
+    logger.info(f"Toplam {len(time_values)} adet hava durumu tahmini işlenecek")
     
     for i, time_str in enumerate(time_values):
         # ISO format tarihi datetime'a çevir
@@ -258,8 +284,10 @@ async def _save_weather_forecast(data: Dict[str, Any], db: Session) -> int:
     
     try:
         db.commit()
+        logger.info(f"{saved_count} adet hava durumu tahmini veritabanına başarıyla kaydedildi")
     except Exception as e:
         db.rollback()
+        logger.error(f"Hava durumu tahminleri kaydedilirken hata: {str(e)}")
         raise e
     
     return saved_count
