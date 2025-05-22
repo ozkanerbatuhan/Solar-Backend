@@ -1,7 +1,7 @@
 # Sistem Mimarisi ve Tasarım Desenleri
 
 ## Genel Mimari
-Sistem, aşağıdaki ana bileşenlerden oluşmaktadır:
+Sistem, bir FastAPI backend ve PostgreSQL veritabanından oluşmaktadır. Makine öğrenimi modelleri, inverter'ların güç çıktısını tahmin etmek için kullanılmaktadır. Sistem, Docker ve Docker Compose kullanılarak containerize edilmiştir.
 
 ```mermaid
 flowchart TD
@@ -86,26 +86,20 @@ Solar-Backend/
 ```
 
 ## Katmanlı Mimari
-Proje, aşağıdaki katmanlardan oluşacaktır:
-
-1. **API Katmanı**: FastAPI ile oluşturulmuş REST endpoint'leri (`app/api/routes/`)
-2. **Servis Katmanı**: İş mantığı, veri işleme ve model etkileşimleri (`app/services/`)
-3. **Model Katmanı**: Veritabanı modelleri ve şemaları (`app/models/` ve `app/schemas/`)
-4. **Tahmin Katmanı**: Makine öğrenimi modelleri ve tahmin mekanizmaları (`app/ml/`)
-5. **Veri Katmanı**: PostgreSQL veritabanı etkileşimleri (`app/db/`)
-6. **Dış Servis Katmanı**: Dış API'lerle iletişim (Hava durumu API'si)
-7. **Container Katmanı**: Docker ile uygulama ve veritabanının containerize edilmesi
+Sistem, aşağıdaki katmanlardan oluşur:
+- **API Katmanı**: FastAPI ile oluşturulan REST API endpoint'leri
+- **Servis Katmanı**: İş mantığı ve veri işleme
+- **Model Katmanı**: Veritabanı modelleri ve ORM
+- **ML Katmanı**: Makine öğrenimi modelleri ve tahmin servisleri
 
 ## Veri Modelleri
-Sistem aşağıdaki ana veri modellerini kullanmaktadır:
-
-1. **Inverter**: Güneş inverterları için temel bilgiler
-2. **InverterData**: İnverterlardan alınan ölçüm verileri
-3. **InverterPrediction**: İnverter güç çıktıları için tahmin verileri
-4. **Model**: Makine öğrenimi modellerinin meta verileri
-5. **WeatherData**: Hava durumu ölçüm verileri (yeni)
-6. **WeatherPrediction**: Gelecek hava durumu tahminleri (yeni)
-7. **ModelMetrics**: Model eğitim metrikleri (yeni)
+Sistem temel olarak aşağıdaki veri modellerini kullanır:
+- **Inverter**: Güneş enerjisi inverter'larına ait temel bilgiler
+- **InverterData**: İnverter'ların saatlik güç çıktısı verileri
+- **WeatherData**: Saatlik hava durumu verileri
+- **WeatherForecast**: Gelecek zaman dilimleri için hava durumu tahminleri
+- **Model**: Eğitilmiş makine öğrenimi modellerine ait meta veriler
+- **Prediction**: Tahmin sonuçları
 
 ## Temel Teknik Kararlar
 - **Asenkron API**: FastAPI'nin asenkron özelliklerinin kullanılması
@@ -129,66 +123,123 @@ Sistem aşağıdaki ana veri modellerini kullanmaktadır:
 - **Health Check**: PostgreSQL konteynerinin hazır olduğundan emin olmak için health check kullanımı
 - **Restart Policy**: Konteynerlerin çökmesi durumunda otomatik yeniden başlatılması
 
-## API Endpoint Yapısı
-API, aşağıdaki temel endpoint gruplarına sahiptir:
+## API Endpoint Yapıları
+API, aşağıdaki endpoint gruplarını içerir:
+- **/api/inverters**: İnverter bilgileri ve verilerine erişim
+- **/api/weather**: Hava durumu verileri ve tahminlerine erişim
+- **/api/models**: Model yönetimi ve eğitimi
+- **/api/predictions**: Tahmin işlemleri ve sonuçları
+- **/api/data**: Veri yükleme ve yönetimi
 
-1. **Inverter Endpoint'leri** (`/api/v1/inverters/`):
-   - İnverter kayıtlarının oluşturulması, listelenmesi ve yönetimi
-   - Gerçek inverter çıktılarının sorgulanması
+## Veri Akışları
+Sistem içindeki temel veri akışları şöyledir:
+1. **Veri Yükleme**: CSV/TXT dosyalarından veri yükleme ve API'den hava durumu verilerini çekme
+2. **Model Eğitimi**: Veritabanındaki veriler kullanılarak modellerin eğitilmesi
+3. **Tahmin**: Hava durumu tahminleri kullanılarak inverter güç çıktısı tahmini
+4. **Raporlama**: Tahmin sonuçlarının analizi ve raporlanması
 
-2. **Tahmin Endpoint'leri** (`/api/v1/predictions/`):
-   - Tahmin verilerinin oluşturulması ve sorgulanması
-   - İnverter bazlı tahmin istekleri
-   - 8 inverterin güç çıktısı tahminlerini toplu alma
+## İş Parçacığı Yönetimi
+Sistem, CPU-yoğun ve uzun süren işlemleri arka planda çalıştırmak için asenkron işlem yeteneklerini kullanır:
+- FastAPI'nin `BackgroundTasks` özelliği
+- Asenkron fonksiyonlar (`async/await`)
+- `asyncio` ile paralel işlem çalıştırma
 
-3. **Model Endpoint'leri** (`/api/v1/models/`):
-   - Makine öğrenimi modellerinin yönetimi
-   - Model eğitim istekleri ve metrik sonuçları
+## Job Yönetimi Mimarisi
 
-4. **Veri Endpoint'leri** (`/api/v1/data/`): (Yeni)
-   - CSV dosyası yükleme
-   - Veri içe aktarma işlemlerinin yönetilmesi
+### Mevcut Durum
+Sistemde şu anda birden fazla job yönetim mekanizması bulunuyor:
+1. **Upload-weather-inverter-data**: Global `current_job_status` değişkeni ile takip edilen temel bir job yapısı
+2. **Upload-txt**: `active_txt_upload_jobs` sözlüğü ile takip edilen, UUID tabanlı job'lar
+3. **Model Eğitimi**: Ayrı bir serviste yönetilen ve takip edilen eğitim job'ları
 
-5. **Hava Durumu Endpoint'leri** (`/api/v1/weather/`): (Yeni)
-   - Hava durumu verilerini çekme
-   - Veritabanındaki hava durumu verilerini sorgulama
+### Planlanan Merkezi Job Yönetimi
+Tüm job'lar tek bir merkezden yönetilmeli:
+- **Job Registry**: Tüm aktif job'ları kaydeden ve durumlarını takip eden merkezi bir kayıt sistemi
+- **Job Manager**: Job'ları oluşturan, başlatan, iptal eden ve durumlarını izleyen bir yönetici sınıf
+- **Job Types**: Farklı tipte job'lar için (veri yükleme, model eğitimi, tahmin vb.) standart arayüzler
+- **Status Tracking**: Job'ların ilerlemesi, başarı/hata durumları ve mesajları için tutarlı bir izleme yapısı
+- **Error Handling**: Job'ların başarısız olması durumunda tutarlı hata yakalama ve raporlama
+- **Logging**: Tüm job adımlarının ve olaylarının yapılandırılmış ve izlenebilir şekilde loglanması
 
-## Veri Akışı
-1. **Veri Yükleme Akışı**:
-   - CSV dosyası API'ye yüklenir
-   - İnverter verileri veritabanına kaydedilir
-   - Open-meteo API'den ilgili tarih aralığı için hava durumu verileri çekilir
-   - Hava durumu verileri veritabanına kaydedilir
-   - Model eğitimi tetiklenebilir
+```python
+# Örnek merkezi job yönetimi yapısı
+class JobManager:
+    def __init__(self):
+        self.jobs = {}  # job_id -> job_details
+    
+    def create_job(self, job_type, params):
+        job_id = f"{job_type}_{uuid.uuid4()}"
+        self.jobs[job_id] = {
+            "id": job_id,
+            "type": job_type,
+            "status": "created",
+            "progress": 0,
+            "params": params,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "logs": []
+        }
+        return job_id
+    
+    def start_job(self, job_id, task_func):
+        self.jobs[job_id]["status"] = "running"
+        self.jobs[job_id]["started_at"] = datetime.utcnow()
+        asyncio.create_task(self._run_job(job_id, task_func))
+        return job_id
+    
+    async def _run_job(self, job_id, task_func):
+        try:
+            result = await task_func(job_id, self.update_job)
+            self.jobs[job_id]["status"] = "completed"
+            self.jobs[job_id]["result"] = result
+        except Exception as e:
+            self.jobs[job_id]["status"] = "failed"
+            self.jobs[job_id]["error"] = str(e)
+        finally:
+            self.jobs[job_id]["completed_at"] = datetime.utcnow()
+    
+    def update_job(self, job_id, status=None, progress=None, message=None):
+        if job_id not in self.jobs:
+            return False
+        
+        if status:
+            self.jobs[job_id]["status"] = status
+        if progress is not None:
+            self.jobs[job_id]["progress"] = progress
+        if message:
+            self.jobs[job_id]["logs"].append({
+                "timestamp": datetime.utcnow(),
+                "message": message
+            })
+        
+        self.jobs[job_id]["updated_at"] = datetime.utcnow()
+        return True
+    
+    def get_job_status(self, job_id):
+        return self.jobs.get(job_id, {"status": "not_found"})
+```
 
-2. **Model Eğitim Akışı**:
-   - Veritabanından inverter ve hava durumu verileri çekilir
-   - İlk eğitim: Veri %70 eğitim, %30 test olarak bölünür
-   - Model metrikleri (R², MAE, RMSE) hesaplanır
-   - İkinci eğitim: Tüm veriyle modeller eğitilir
-   - Modeller disk üzerinde saklanır, metaverileri veritabanına kaydedilir
+## Saatlik Üretim Hesaplama Stratejisi
+Kümülatif inverter verileri, aşağıdaki stratejiler kullanılarak saatlik üretime dönüştürülecek:
+1. **Fark Hesaplama**: Ardışık zaman noktaları arasındaki farkı hesaplama
+2. **Negatif Değerleri Düzeltme**: Gün başlangıcı veya veri hatası nedeniyle oluşan negatif değerleri düzeltme
+3. **Zaman Dilimine Göre Gruplama**: Saatlik verileri oluşturmak için uygun zaman diliminde gruplama
+4. **Anormallik Tespiti**: Olağandışı artışları tespit edip düzeltme
 
-3. **Tahmin Akışı**:
-   - Open-meteo API'den gelecek hava durumu tahminleri çekilir
-   - Modeller kullanılarak inverter güç çıktıları tahmin edilir
-   - Tahmin sonuçları veritabanına kaydedilir
+## Hata İşleme Stratejisi
+Sistem, aşağıdaki hata işleme stratejilerini kullanır:
+- **İzole Başarısızlık**: Bir işlemin başarısız olması, tüm sistemin çökmesine neden olmamalı
+- **Hata Kaydı**: Tüm hatalar ayrıntılı olarak loglanmalı
+- **Hata Geri Bildirimi**: API endpoint'leri, anlamlı hata mesajları döndürmeli
+- **İşlem Yeniden Deneme**: Kritik işlemler, belirli koşullar altında otomatik olarak yeniden denenebilmeli
 
-4. **API Sunumu Akışı**:
-   - Gerçek inverter verileri veritabanından çekilir
-   - Tahmin sonuçları veritabanından çekilir
-   - İstemciye JSON formatında sunulur
+## Loglama Yapısı
+Sistem, yapılandırılmış bir loglama yaklaşımı kullanır:
+- **Merkezi Loglama**: Tüm bileşenler, standart bir loglama mekanizması kullanır
+- **Log Seviyeleri**: DEBUG, INFO, WARNING, ERROR, CRITICAL
+- **Bağlam Bilgisi**: Her log, ilgili işlem ve veriler hakkında bağlam bilgisi içerir
 
-## Bileşen İlişkileri
-- **Controller -> Service**: API endpoint'leri ilgili servisleri çağırır
-- **Service -> Repository**: Servisler veri erişimi için ORM modellerini kullanır
-- **Service -> ML Model**: Servisler tahmin için ML modellerini kullanır
-- **ML Model -> Repository**: Model eğitimi için veritabanından veri çekilir
-- **Weather Service -> External API**: Hava durumu servisi dış API'yi çağırır
-
-## Ölçeklenebilirlik Yaklaşımı
-- Modeller birbirinden bağımsız olarak eğitilebilir ve güncellenebilir
-- API, artan talep durumunda yatay olarak ölçeklenebilir
-- Veritabanı performans optimizasyonları için indeksleme stratejileri kullanılacaktır
-- Uzun süren model eğitimleri için asenkron işleme yöntemi kullanılacaktır
-- Docker imajları ölçeklenebilir sistemlere (Kubernetes vb.) kolay entegre edilebilir
-- Veritabanı yükü artarsa, PostgreSQL için ayrı bir sunucu kullanılabilir 
+## Dış Servis Entegrasyonları
+Sistem, aşağıdaki dış servislerle entegre çalışır:
+- **Open-meteo API**: Hava durumu verileri ve tahminleri için
+- **Diğer Potansiyel Servisler**: Gelecekte eklenmesi planlanan diğer servisler 

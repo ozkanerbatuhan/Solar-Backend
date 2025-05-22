@@ -1,3 +1,4 @@
+from asyncio.log import logger
 import io
 import time
 from typing import List, Optional, Dict, Any
@@ -21,23 +22,10 @@ from app.services.data_import_service import (
     process_txt_data,
     validate_txt_data
 )
+from app.utils.data_processing import InverterDataProcessor
 from app.core.config import settings
 
 router = APIRouter()
-
-# İşlem durumunu takip etmek için global değişkenler
-current_job_status = {
-    "job_id": None,
-    "status": "idle",  # idle, running, completed, failed
-    "progress": 0,
-    "total_rows": 0,
-    "processed_rows": 0,
-    "weather_rows": 0,
-    "inverter_rows": 0,
-    "start_time": None,
-    "end_time": None,
-    "message": ""
-}
 
 @router.post("/reset-database")
 async def reset_database(
@@ -142,31 +130,35 @@ async def upload_csv_data(
         )
 
 async def process_weather_inverter_data_background(
+    job_id: str,
+    update_job,
     contents: bytes,
     start_date: datetime,
     end_date: datetime
-):
+) -> Dict[str, Any]:
     """
     Hava durumu ve inverter verilerini arka planda işler.
     
     Args:
+        job_id: İş kimliği
+        update_job: Job güncelleme callback fonksiyonu
         contents: CSV dosya içeriği
         start_date: Başlangıç tarihi
         end_date: Bitiş tarihi
+        
+    Returns:
+        İşlem sonucu
     """
-    global current_job_status
-    
     try:
-        current_job_status["status"] = "running"
-        current_job_status["start_time"] = datetime.now()
-        current_job_status["message"] = "İşlem başladı"
+        update_job(job_id, status="running", message="İşlem başladı")
         
         # CSV dosyasını pandas ile oku
         csv_file = io.StringIO(contents.decode('utf-8'))
         df = pd.read_csv(csv_file)
         
         # Toplam satır sayısını kaydet
-        current_job_status["total_rows"] = len(df)
+        total_rows = len(df)
+        update_job(job_id, message=f"CSV dosyası okundu: {total_rows} satır")
         
         # Tarih sütununun datetime formatına dönüştürülmesi
         df['time'] = pd.to_datetime(df['time'])
@@ -174,8 +166,7 @@ async def process_weather_inverter_data_background(
         # Filtrelemeyi uygula
         df = df[(df['time'] >= start_date) & (df['time'] <= end_date)]
         filtered_count = len(df)
-        current_job_status["processed_rows"] = 0
-        current_job_status["message"] = f"Tarih filtreleme: {len(df)} satır kaldı"
+        update_job(job_id, message=f"Tarih filtreleme: {filtered_count} satır kaldı", progress=10)
         
         # Sütun isimlerini eşleştir
         inverter_columns_map = {}
@@ -185,10 +176,22 @@ async def process_weather_inverter_data_background(
                 inverter_columns_map[simple_name] = col
         
         inverter_columns = list(inverter_columns_map.values())
+        update_job(job_id, message=f"{len(inverter_columns)} inverter sütunu bulundu", progress=15)
         
         # Boş değerleri -1 ile doldur
         for col in inverter_columns:
             df[col] = df[col].fillna(-1)
+        
+        # Kümülatif verileri saatlik üretime dönüştür
+        update_job(job_id, message="Kümülatif veriler saatlik üretime dönüştürülüyor...", progress=20)
+        try:
+            # InverterDataProcessor ile verileri saatlik üretime dönüştür
+            hourly_df = InverterDataProcessor.calculate_hourly_power(df, inverter_columns)
+            update_job(job_id, message=f"Veriler saatlik üretime dönüştürüldü. {len(hourly_df)} satır", progress=25)
+        except Exception as e:
+            update_job(job_id, message=f"Veriler dönüştürülürken hata: {str(e)}", level="WARNING")
+            # Hata olursa orijinal veriyi kullan
+            hourly_df = df
         
         # Veritabanı bağlantısı
         from app.db.database import SessionLocal
@@ -210,6 +213,7 @@ async def process_weather_inverter_data_background(
                     db.add(inverter)
             
             db.commit()
+            update_job(job_id, message="İnverter kayıtları kontrol edildi", progress=30)
             
             # Sayaçlar
             processed_rows = 0
@@ -223,7 +227,7 @@ async def process_weather_inverter_data_background(
             inverter_batch = []
             
             # DataFrame üzerinde iterate ederek verileri veritabanına kaydet
-            for index, row in df.iterrows():
+            for index, row in hourly_df.iterrows():
                 timestamp = row['time']
                 
                 # Mevcut hava durumu verisini kontrol et
@@ -250,7 +254,7 @@ async def process_weather_inverter_data_background(
                         weather_batch.append(weather_data)
                         weather_rows += 1
                     except Exception as e:
-                        current_job_status["message"] = f"Hava durumu verisi eklenirken hata: {e}, Satır: {index}"
+                        update_job(job_id, message=f"Hava durumu verisi eklenirken hata: {e}, Satır: {index}", level="WARNING")
                 
                 # İnverter verilerini ekle
                 for inv_id in range(1, 9):
@@ -258,9 +262,17 @@ async def process_weather_inverter_data_background(
                     full_column = inverter_columns_map.get(simple_column)
                     
                     if full_column is not None and full_column in df.columns:
-                        power_value = row[full_column]
+                        # Saatlik üretim sütununu kullan (hourly_ önekli)
+                        hourly_column = f"hourly_{full_column}"
+                        power_value = 0
                         
-                        if pd.notna(power_value) or power_value == -1:
+                        # Eğer saatlik sütun varsa onu kullan, yoksa orijinal değeri kullan
+                        if hourly_column in hourly_df.columns:
+                            power_value = row[hourly_column]
+                        else:
+                            power_value = row[full_column]
+                        
+                        if pd.notna(power_value):
                             existing_inverter_data = db.query(InverterData).filter(
                                 InverterData.inverter_id == inv_id,
                                 InverterData.timestamp == timestamp
@@ -284,16 +296,18 @@ async def process_weather_inverter_data_background(
                                     inverter_rows += 1
                                     inverter_counts[inv_id] += 1
                                 except Exception as e:
-                                    current_job_status["message"] = f"Değer dönüştürme hatası: {e}, Değer: {power_value}"
+                                    update_job(job_id, message=f"Değer dönüştürme hatası: {e}, Değer: {power_value}", level="WARNING")
                 
                 processed_rows += 1
-                current_job_status["processed_rows"] = processed_rows
-                current_job_status["weather_rows"] = weather_rows
-                current_job_status["inverter_rows"] = inverter_rows
                 
-                # İlerleme yüzdesini güncelle
-                progress = int((processed_rows / filtered_count) * 100)
-                current_job_status["progress"] = progress
+                # İlerleme yüzdesini güncelle (her 100 satırda bir)
+                if processed_rows % 100 == 0 or processed_rows == len(hourly_df):
+                    progress = int(35 + (processed_rows / len(hourly_df)) * 60)  # 35% - 95% arası
+                    update_job(
+                        job_id, 
+                        progress=min(95, progress),
+                        message=f"İşleniyor: {processed_rows}/{len(hourly_df)} satır, {weather_rows} hava durumu, {inverter_rows} inverter verisi"
+                    )
                 
                 # Belirli aralıklarla commit yap
                 if len(weather_batch) + len(inverter_batch) >= batch_size:
@@ -316,33 +330,41 @@ async def process_weather_inverter_data_background(
                 db.commit()
             
             # İşlem tamamlandı
-            current_job_status["status"] = "completed"
-            current_job_status["end_time"] = datetime.now()
-            current_job_status["message"] = f"İşlem tamamlandı. {processed_rows} satır işlendi. {weather_rows} hava durumu ve {inverter_rows} inverter verisi eklendi."
+            update_job(
+                job_id, 
+                status="completed", 
+                progress=100,
+                message=f"İşlem tamamlandı. {processed_rows} satır işlendi. {weather_rows} hava durumu ve {inverter_rows} inverter verisi eklendi."
+            )
+            
+            return {
+                "processed_rows": processed_rows,
+                "weather_rows": weather_rows,
+                "inverter_rows": inverter_rows,
+                "inverter_counts": inverter_counts
+            }
             
         except Exception as e:
             db.rollback()
-            current_job_status["status"] = "failed"
-            current_job_status["end_time"] = datetime.now()
-            current_job_status["message"] = f"Veri işleme hatası: {str(e)}"
+            update_job(job_id, status="failed", message=f"Veri işleme hatası: {str(e)}", level="ERROR")
             import traceback
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
+            raise e
         finally:
             db.close()
     
     except Exception as e:
-        current_job_status["status"] = "failed"
-        current_job_status["end_time"] = datetime.now()
-        current_job_status["message"] = f"Genel hata: {str(e)}"
+        update_job(job_id, status="failed", message=f"Genel hata: {str(e)}", level="ERROR")
         import traceback
-        print(traceback.format_exc())
+        logger.error(traceback.format_exc())
+        raise e
 
 @router.post("/upload-weather-inverter-data")
 async def upload_weather_inverter_data(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     start_date: Optional[str] = Form("2023-04-30T23:00:00"),
-    end_date: Optional[str] = Form("2024-11-18T12:00:00")
+    end_date: Optional[str] = Form("2024-11-18T12:00:00"),
+    db: Session = Depends(get_db)
 ):
     """
     CSV dosyasından hava durumu ve inverter verilerini arka planda yükler.
@@ -352,30 +374,19 @@ async def upload_weather_inverter_data(
         file: CSV dosyası
         start_date: Başlangıç tarihi (isteğe bağlı, varsayılan: 2023-04-30T23:00:00)
         end_date: Bitiş tarihi (isteğe bağlı, varsayılan: 2024-11-18T12:00:00)
+        db: Veritabanı oturumu
     """
     try:
-        global current_job_status
+        # JobManager instance'ını al
+        from app.services.job_manager_service import get_job_manager
+        job_manager = get_job_manager()
         
-        # Eğer halihazırda bir işlem çalışıyorsa
-        if current_job_status["status"] == "running":
-            return {
-                "success": False,
-                "message": "Zaten devam eden bir veri yükleme işlemi mevcut.",
-                "job_id": current_job_status["job_id"],
-                "status": current_job_status["status"],
-                "progress": current_job_status["progress"]
-            }
-        
-        # Yeni bir iş başlat
-        current_job_status["job_id"] = f"job_{int(time.time())}"
-        current_job_status["status"] = "starting"
-        current_job_status["progress"] = 0
-        current_job_status["processed_rows"] = 0
-        current_job_status["weather_rows"] = 0
-        current_job_status["inverter_rows"] = 0
-        current_job_status["start_time"] = datetime.now()
-        current_job_status["end_time"] = None
-        current_job_status["message"] = "Dosya yükleniyor..."
+        # Job parametrelerini oluştur
+        job_params = {
+            "file_name": file.filename,
+            "start_date": start_date,
+            "end_date": end_date
+        }
         
         # CSV içeriğini oku
         contents = await file.read()
@@ -384,65 +395,115 @@ async def upload_weather_inverter_data(
         try:
             start_date_dt = datetime.fromisoformat(start_date)
         except ValueError:
-            print(f"Hata: {start_date}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Geçersiz başlangıç tarihi formatı: {start_date}"
+            )
         
         try:
             end_date_dt = datetime.fromisoformat(end_date)
         except ValueError:
-            print(f"Hata: {end_date}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Geçersiz bitiş tarihi formatı: {end_date}"
+            )
         
-        # Arka planda işleme başlat
-        background_tasks.add_task(
-            process_weather_inverter_data_background,
-            contents,
-            start_date_dt,
-            end_date_dt
+        # Yeni bir job oluştur
+        job_id = job_manager.create_job(
+            job_type="weather_inverter_upload",
+            params=job_params,
+            description=f"Hava durumu ve inverter verisi yükleme: {file.filename}"
+        )
+        
+        # Job'ı başlat
+        await job_manager.start_job(
+            job_id=job_id,
+            task_func=lambda job_id, update_job: process_weather_inverter_data_background(
+                job_id=job_id,
+                update_job=update_job,
+                contents=contents,
+                start_date=start_date_dt,
+                end_date=end_date_dt
+            )
         )
         
         return {
             "success": True,
-            "message": "Veri yükleme işlemi başlatıldı. İlerlemeyi kontrol etmek için /api/data/job-status endpoint'ini kullanabilirsiniz.",
-            "job_id": current_job_status["job_id"],
-            "status": current_job_status["status"]
+            "message": "Veri yükleme işlemi başlatıldı. İlerlemeyi kontrol etmek için /api/jobs/status/{job_id} endpoint'ini kullanabilirsiniz.",
+            "job_id": job_id,
+            "status": "running"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Veri yükleme başlatma hatası: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Veri yükleme hatası: {str(e)}"
+        )
+
+@router.get("/job-status")
+async def get_weather_inverter_job_status(db: Session = Depends(get_db)):
+    """
+    Eski job status endpoint'i - geriye dönük uyumluluk için bırakıldı.
+    JobManager'da "weather_inverter_upload" tipinde job araması yapar ve en sonuncuyu döndürür.
+    """
+    try:
+        from app.services.job_manager_service import get_job_manager
+        job_manager = get_job_manager()
+        
+        # "weather_inverter_upload" tipinde active job'ları ara
+        active_jobs = job_manager.get_active_jobs(job_type="weather_inverter_upload")
+        
+        if active_jobs:
+            # En son oluşturulan job'ı al
+            job = active_jobs[0]
+            for j in active_jobs:
+                if j["created_at"] > job["created_at"]:
+                    job = j
+            
+            # Job'ı eski formatla uyumlu hale getir
+            return {
+                "job_id": job["id"],
+                "status": job["status"],
+                "progress": job["progress"],
+                "start_time": job["started_at"],
+                "end_time": job["completed_at"],
+                "message": job["logs"][-1]["message"] if job["logs"] else "",
+                "processed_rows": job["result"].get("processed_rows", 0) if job.get("result") else 0,
+                "weather_rows": job["result"].get("weather_rows", 0) if job.get("result") else 0,
+                "inverter_rows": job["result"].get("inverter_rows", 0) if job.get("result") else 0
+            }
+        
+        # Job bulunamadıysa bos bir status döndür
+        return {
+            "job_id": None,
+            "status": "idle",
+            "progress": 0,
+            "start_time": None,
+            "end_time": None,
+            "message": "Aktif bir veri yükleme işlemi yok",
+            "processed_rows": 0,
+            "weather_rows": 0,
+            "inverter_rows": 0
         }
     
     except Exception as e:
-        current_job_status["status"] = "failed"
-        current_job_status["end_time"] = datetime.now()
-        current_job_status["message"] = f"Veri yükleme başlatma hatası: {str(e)}"
+        logger.error(f"Job durumu alınırken hata: {str(e)}")
         
         return {
-            "success": False,
-            "message": f"Veri yükleme hatası: {str(e)}",
-            "job_id": current_job_status["job_id"],
-            "status": "failed"
+            "job_id": None,
+            "status": "error",
+            "progress": 0,
+            "message": f"Job durumu alınırken hata: {str(e)}",
+            "processed_rows": 0,
+            "weather_rows": 0,
+            "inverter_rows": 0
         }
-
-@router.get("/job-status")
-async def get_job_status():
-    """
-    Mevcut işlemin durumunu döndürür.
-    """
-    global current_job_status
-    
-    elapsed_time = None
-    if current_job_status["start_time"]:
-        if current_job_status["end_time"]:
-            elapsed_time = (current_job_status["end_time"] - current_job_status["start_time"]).total_seconds()
-        else:
-            elapsed_time = (datetime.now() - current_job_status["start_time"]).total_seconds()
-    
-    return {
-        "job_id": current_job_status["job_id"],
-        "status": current_job_status["status"],
-        "progress": current_job_status["progress"],
-        "total_rows": current_job_status["total_rows"],
-        "processed_rows": current_job_status["processed_rows"],
-        "weather_rows": current_job_status["weather_rows"],
-        "inverter_rows": current_job_status["inverter_rows"],
-        "elapsed_time": elapsed_time,
-        "message": current_job_status["message"]
-    }
 
 @router.get("/statistics", response_model=DataStatistics)
 async def get_data_statistics(
@@ -867,7 +928,8 @@ async def upload_txt_data(
     validate_only: bool = Form(False),
     fetch_weather: bool = Form(True),
     forced: bool = Form(False),
-    train_models: bool = Form(False),
+    train_models: bool = Form(True),
+    fetch_future_weather: bool = Form(True),
     db: Session = Depends(get_db)
 ):
     """
@@ -879,6 +941,7 @@ async def upload_txt_data(
         fetch_weather: İlgili hava durumu verilerini çek
         forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
         train_models: Veriler yüklendikten sonra model eğitimi yapılsın mı?
+        fetch_future_weather: Gelecek bir haftalık hava durumu tahminlerini çek
         db: Veritabanı oturumu
     """
     try:
@@ -907,78 +970,38 @@ async def upload_txt_data(
         # Dosyayı başa sar
         txt_file.seek(0)
         
-        # TXT verilerini işle
-        result = await process_txt_data(txt_file, db, forced)
+        # TXT verilerini işle - tüm işlemleri tek bir job içinde yap
+        result = await process_txt_data(
+            txt_file=txt_file, 
+            db=db, 
+            forced=forced,
+            fetch_weather=fetch_weather,
+            train_models=train_models,
+            fetch_future_weather=fetch_future_weather
+        )
         
         job_id = result.get("job_id")
-        
-        # Arka planda hava durumu verilerini çek
-        if fetch_weather and result["processed_rows"] > 0:
-            background_tasks.add_task(fetch_weather_data_for_dates, db)
-        
-        # Model eğitimi yapılsın mı?
-        train_job_id = None
-        if train_models and job_id:
-            from app.services.model_training_service import start_all_models_training_job
-            
-            # Model eğitim işlemini başlat
-            train_job_id = await start_all_models_training_job(
-                db_connection_string=str(settings.DATABASE_URL),
-                test_split=True,
-                test_size=0.2
-            )
         
         # Sonuç döndür
         return {
             "success": True,
-            "message": f"Veri yükleme işlemi başlatıldı, durum için /api/data/txt-job-status/{job_id} endpointi kullanılabilir",
+            "message": f"Veri yükleme işlemi başlatıldı, durum için /api/data/job-status/{job_id} endpointi kullanılabilir",
             "processed_rows": result["processed_rows"],
             "conflict_count": result["conflict_count"],
             "updated_count": result["updated_count"],
             "total_inverters": result["total_inverters"],
             "statistics": validation_result["statistics"],
-            "job_id": job_id,
-            "train_job_id": train_job_id
+            "job_id": job_id
         }
     
     except Exception as e:
+        import traceback
+        logger.error(f"TXT yükleme hatası: {str(e)}")
+        logger.error(traceback.format_exc())
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"TXT yükleme hatası: {str(e)}"
-        )
-
-@router.get("/txt-job-status/{job_id}", response_model=TxtDataUploadJob)
-async def get_txt_job_status(
-    job_id: str,
-    db: Session = Depends(get_db)
-):
-    """
-    TXT veri yükleme işleminin durumunu döndürür.
-    
-    Args:
-        job_id: İş kimliği
-        db: Veritabanı oturumu
-    """
-    try:
-        from app.services.data_import_service import get_txt_upload_job_status
-        
-        # İş durumunu al
-        job_status = get_txt_upload_job_status(job_id)
-        
-        if job_status["status"] == "not_found":
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"ID: {job_id} olan TXT yükleme işi bulunamadı"
-            )
-        
-        return job_status
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"TXT yükleme durumu alınırken hata: {str(e)}"
         )
 
 @router.get("/model-logs/{model_version}", response_model=ModelLogResponse)
@@ -1092,21 +1115,26 @@ async def get_model_logs(
             "log": None
         }
 
-@router.get("/cleanup-jobs")
+@router.post("/jobs/cleanup", response_model=dict)
 async def cleanup_jobs(
-    hours: int = Query(24, description="Temizlenecek saatlerin sayısı"),
+    hours: int = Query(24, description="Temizlenecek saatlerin sayısı", ge=1),
     db: Session = Depends(get_db)
 ):
     """
-    Belirli bir süreden daha eski işleri temizler.
+    Belirli bir süreden daha eski job'ları temizler.
     
     Args:
         hours: Maksimum saat cinsinden yaş
         db: Veritabanı oturumu
     """
     try:
+        from app.services.job_manager_service import get_job_manager
         from app.services.model_training_service import cleanup_old_jobs
         from app.services.data_import_service import cleanup_old_txt_upload_jobs
+        
+        # Merkezi job yönetimindeki eski job'ları temizle
+        job_manager = get_job_manager()
+        removed_jobs = job_manager.cleanup_old_jobs(hours)
         
         # Eski model eğitim işlerini temizle
         removed_model_jobs = cleanup_old_jobs(hours)
@@ -1116,7 +1144,8 @@ async def cleanup_jobs(
         
         return {
             "success": True,
-            "message": f"{removed_model_jobs} model eğitim işi ve {removed_txt_jobs} TXT yükleme işi temizlendi",
+            "message": f"{removed_jobs} merkezi job, {removed_model_jobs} model eğitim işi ve {removed_txt_jobs} TXT yükleme işi temizlendi",
+            "removed_jobs": removed_jobs,
             "removed_model_jobs": removed_model_jobs,
             "removed_txt_jobs": removed_txt_jobs
         }
@@ -1242,4 +1271,100 @@ async def get_training_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Eğitim durumu alınırken hata: {str(e)}"
+        )
+
+@router.get("/jobs", response_model=dict)
+async def get_all_jobs(
+    job_type: Optional[str] = Query(None, description="Job tipi filtresi"),
+    include_history: bool = Query(False, description="Tamamlanan job'ları da listele"),
+    limit: int = Query(20, description="Maksimum job sayısı", ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """
+    Aktif ve tamamlanmış job'ları listeler.
+    
+    Args:
+        job_type: Job tipi filtresi
+        include_history: Tamamlanan job'ları da listele
+        limit: Maksimum job sayısı
+        db: Veritabanı oturumu
+    """
+    try:
+        from app.services.job_manager_service import get_job_manager
+        
+        job_manager = get_job_manager()
+        
+        # Aktif job'ları al
+        active_jobs = job_manager.get_active_jobs(job_type)
+        
+        # Geçmiş job'ları al (eğer istenirse)
+        history_jobs = []
+        if include_history:
+            history_jobs = job_manager.get_job_history(job_type, limit)
+        
+        # Aktif job'ları özet formata dönüştür
+        active_summaries = []
+        for job in active_jobs:
+            # Özet için log kayıtlarını ve detayları hariç tut
+            summary = {
+                "id": job.get("id"),
+                "type": job.get("type"),
+                "status": job.get("status"),
+                "progress": job.get("progress", 0),
+                "created_at": job.get("created_at"),
+                "started_at": job.get("started_at"),
+                "updated_at": job.get("updated_at"),
+                "description": job.get("description", "")
+            }
+            
+            # Son log mesajını ekle
+            logs = job.get("logs", [])
+            if logs:
+                summary["last_message"] = logs[-1].get("message", "")
+            else:
+                summary["last_message"] = ""
+            
+            active_summaries.append(summary)
+        
+        # Geçmiş job'ları özet formata dönüştür
+        history_summaries = []
+        for job in history_jobs:
+            # Özet için log kayıtlarını ve detayları hariç tut
+            summary = {
+                "id": job.get("id"),
+                "type": job.get("type"),
+                "status": job.get("status"),
+                "progress": job.get("progress", 0),
+                "created_at": job.get("created_at"),
+                "started_at": job.get("started_at"),
+                "completed_at": job.get("completed_at"),
+                "updated_at": job.get("updated_at"),
+                "description": job.get("description", ""),
+                "error": job.get("error")
+            }
+            
+            # Son log mesajını ekle
+            logs = job.get("logs", [])
+            if logs:
+                summary["last_message"] = logs[-1].get("message", "")
+            else:
+                summary["last_message"] = ""
+            
+            history_summaries.append(summary)
+        
+        return {
+            "active_jobs": {
+                "total": len(active_summaries),
+                "jobs": active_summaries
+            },
+            "history_jobs": {
+                "total": len(history_summaries),
+                "jobs": history_summaries
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Job'lar listelenirken hata: {str(e)}"
         ) 

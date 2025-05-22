@@ -12,7 +12,7 @@ from app.models import model, inverter, weather
 
 # API rotaları
 from app.core.config import settings
-from app.api.routes import inverter_routes, model_routes, data_routes, weather_routes
+from app.api.routes import inverter_routes, model_routes, data_routes, weather_routes, job_routes
 
 # Loglama yapılandırması
 logging.basicConfig(
@@ -95,6 +95,7 @@ app.include_router(inverter_routes.router, prefix="/api/inverters", tags=["Inver
 app.include_router(model_routes.router, prefix="/api/models", tags=["Models"])
 app.include_router(data_routes.router, prefix="/api/data", tags=["Data"])
 app.include_router(weather_routes.router, prefix="/api/weather", tags=["Weather"])
+app.include_router(job_routes.router, prefix="/api/jobs", tags=["Jobs"])
 
 # Model klasörünü oluştur
 os.makedirs(os.path.join(os.path.dirname(__file__), "ml", "models"), exist_ok=True)

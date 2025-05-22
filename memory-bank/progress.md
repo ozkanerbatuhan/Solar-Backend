@@ -30,16 +30,23 @@
 - pydantic-settings paketi eklenerek bağımlılıklar güncellendi
 - PostgreSQL bağlantısı başarıyla kuruldu ve veritabanı tabloları oluşturuldu
 - README.md dosyası Docker kurulum talimatlarıyla güncellendi
+- Merkezi job yönetimi yapısı oluşturuldu
+- Kümülatif inverter verilerini saatlik üretime dönüştürme algoritması geliştirildi
+- TXT yükleme işlemi geliştirildi ve tüm süreç tek bir job içinde toplandı
+- Kritik noktalarda loglama eklendi
+- Model eğitimi sonrası gelecek hava durumu tahminlerinin otomatik çekilmesi sağlandı
 
 ## Devam Edenler
-- ML kütüphaneleri ve modellerin Docker ortamında test edilmesi
-- Test verileriyle veritabanının doldurulması
-- Sistemin uçtan uca test edilmesi
+- Yeni job yönetimi ve data processing yapısının test edilmesi
+- API'lar arası entegrasyonların doğrulanması
+- Yeni yapının kullanıcılara tanıtılması
 
 ## Yeni Gereksinimler
 - Docker imajlarının optimizasyonu
 - Docker üzerinde çalışan ML modellerinin performans değerlendirmesi
 - CI/CD pipeline entegrasyonu düşünülmeli
+- Job yönetimi için kullanıcı arayüzü oluşturulması
+- Üretim ortamında yeni sistem davranışının gözlemlenmesi
 
 ## Yapılacaklar
 - [x] Proje dosya yapısının kurulması
@@ -70,6 +77,14 @@
 - [x] Docker ve Docker Compose yapılandırmasının oluşturulması
 - [x] PostgreSQL veritabanı kurulumu ve bağlantısı (Docker ile)
 - [x] Veritabanı şemalarının ve tablolarının oluşturulması
+- [x] Merkezi job yönetimi yapısının oluşturulması
+- [x] Kümülatif inverter verilerini saatlik üretime dönüştürme algoritmasının geliştirilmesi
+- [x] TXT yükleme işleminin geliştirilmesi ve tüm sürecin tek bir job içinde toplanması
+- [x] Kritik noktalarda loglama eklenmesi
+- [x] Model eğitimi sonrası gelecek hava durumu tahminlerinin otomatik çekilmesi
+- [ ] Yeni job yönetimi ve data processing yapısının test edilmesi
+- [ ] API'lar arası entegrasyonların doğrulanması
+- [ ] Yeni yapının kullanıcılara tanıtılması
 - [ ] Test verileriyle modellerin eğitilmesi ve değerlendirilmesi
 - [ ] Veritabanı migrasyon işlemlerinin yapılandırılması (Alembic)
 - [ ] ML kütüphaneleri Docker ortamında test edilmesi
@@ -81,9 +96,10 @@
 - [ ] CI/CD pipeline entegrasyonunun düşünülmesi
 
 ## Engeller
-- ML kütüphaneleri Docker ortamında daha fazla test edilmeli
-- Docker konteynerleri arası iletişim gecikmeleri değerlendirilmeli
-- ML modelleri için Docker üzerindeki kaynak yeterliliği test edilmeli
+- Farklı job yönetim yapılarının merkezileştirilmesi karmaşık olabilir
+- Kümülatif verilerin saatlik verilere dönüştürülmesi sırasında veri kaybı olmamalı
+- Tüm süreçlerin tek bir job içinde toplanması iyi bir hata yönetimi gerektirir
+- Model eğitimi uzun süren bir işlem olduğu için job yönetimi dikkatli yapılmalı
 - Open-meteo API'nin rate limit'lerine dikkat edilmeli
 - Modellerin eğitimi için yeterli veri olduğundan emin olunmalı
 
@@ -95,21 +111,21 @@
 - **Aşama 5**: API endpoint'lerinin son haline getirilmesi ✅
 - **Aşama 6**: Model çakışmalarının çözülmesi ve API'nin çalıştırılması ✅
 - **Aşama 7**: PostgreSQL veritabanı kurulumu ve entegrasyonu (Docker ile) ✅
-- **Aşama 8**: ML kütüphaneleri Docker ortamında test edilmesi ⏳
-- **Aşama 9**: Test, optimizasyon ve dokümantasyon ⏳
-- **Aşama 10**: Docker imajlarının optimizasyonu ve CI/CD entegrasyonu ⏳
+- **Aşama 8**: Merkezi job yönetimi yapısının oluşturulması ✅
+- **Aşama 9**: Kümülatif verilerin saatlik verilere dönüştürülmesi ✅
+- **Aşama 10**: TXT yükleme ve model eğitiminin entegrasyonu ✅
+- **Aşama 11**: Test, optimizasyon ve dokümantasyon ⏳
+- **Aşama 12**: Docker imajlarının optimizasyonu ve CI/CD entegrasyonu ⏳
 
 ## Öncelikli Görevler
-1. Test verileriyle veritabanının doldurulması
-2. ML kütüphaneleri ve modellerinin Docker ortamında test edilmesi
-3. Uçtan uca tahmin işlevselliğinin test edilmesi
-4. Docker imajlarının optimizasyonu
-5. Hata yönetimi ve loglama sisteminin geliştirilmesi
+1. Yeni job yönetimi ve data processing yapısının test edilmesi
+2. API'lar arası entegrasyonların doğrulanması
+3. Yeni yapının kullanıcılara tanıtılması
+4. Hata yönetimi ve loglama sisteminin geliştirilmesi
+5. Docker imajlarının optimizasyonu
 6. Dokümantasyon ve API açıklamalarının geliştirilmesi
-7. Performans ve stres testlerinin yapılması
 
 ## Bilinen Sorunlar
-- ML modelleri için Docker üzerindeki performans henüz test edilmedi
-- Docker imajlarının boyutu optimize edilmeli
-- Konteyner yeniden başlatmalarında veritabanı verilerinin kalıcılığı test edilmeli
-- Yeterli veri olmadan model eğitimi doğru sonuçlar vermeyebilir 
+- Yeni job yönetimi henüz test edilmedi
+- API'lar arası entegrasyonlar doğrulanmadı
+- Kullanıcılar yeni sisteme alışması için dokümantasyon hazırlanmalı 

@@ -1,42 +1,38 @@
 # Aktif Bağlam
 
 ## Mevcut Odak
-Docker ile containerizasyon tamamlandı ve PostgreSQL veritabanı bağlantısı başarıyla kuruldu. Sistem artık Docker üzerinde çalışabilir durumda ve API http://localhost:8000 üzerinden erişilebilir. Bir sonraki adım olarak, ML modelleri entegrasyonu ve veri akışının test edilmesi planlanmaktadır.
+Job yönetiminin merkezileştirilmesi, kümülatif inverter verilerinin saatlik üretime dönüştürülmesi ve API entegrasyonlarının iyileştirilmesi üzerine çalışmalar tamamlandı. Yeni sistemin test edilmesi ve kullanıcılara tanıtılması öncelikli hedefler arasında yer alıyor.
 
 ## Son Değişiklikler
-- Proje Docker ve Docker Compose ile containerize edildi
-  - Dockerfile ve docker-compose.yml dosyaları oluşturuldu
-  - PostgreSQL veritabanı Docker konteyneri olarak yapılandırıldı
-  - API servisi Docker konteyneri olarak çalışacak şekilde ayarlandı
-  - .dockerignore dosyası eklenerek gereksiz dosyaların konteynere kopyalanması engellendi
-- PostgreSQL bağlantısı başarıyla sağlandı ve veritabanı tabloları oluşturuldu
-- pydantic-settings paketi eklenerek pydantic 2.x uyumluluğu tamamlandı
-- PostgreSQL bağlantı URL'si düzeltildi (path formatı düzenlendi)
-- API ve veritabanı arasındaki bağlantı sağlık kontrolü başarıyla tamamlandı
-- README.md dosyası Docker kurulum talimatlarıyla güncellendi
+- Merkezi job yönetimi için JobManager sınıfı oluşturuldu
+- TXT yükleme, hava durumu verisi çekme ve model eğitimi işlemleri tek bir job içinde birleştirildi
+- Kümülatif inverter verilerini saatlik üretime dönüştüren InverterDataProcessor sınıfı geliştirildi
+- Job'ların yönetimi için `/api/jobs` endpoint'leri eklendi
+- Model eğitimi sonrası gelecek hava durumu tahminlerinin otomatik çekilmesi sağlandı
+- Kritik noktalarda loglama eklendi
+- Tüm job'ların durumu ve geçmişi izlemek için API endpoint'leri oluşturuldu
 
 ## Yeni Gereksinimler
-- Makine öğrenimi modellerinin Docker ortamında çalışacak şekilde uyarlanması
-- Veritabanına test verilerinin yüklenmesi
-- Modellerin eğitiminin ve tahmin performansının test edilmesi
-- Hava durumu API entegrasyonunun gerçek verilerle test edilmesi
-- Docker imajlarının optimize edilmesi (boyut ve performans açısından)
+- Yeni job yönetimi ve data processing yapısının test edilmesi
+- API'lar arası entegrasyonların doğrulanması
+- Yeni yapının kullanıcılara tanıtılması
+- Job yönetimi için kullanıcı arayüzü oluşturulması
+- Üretim ortamında yeni sistem davranışının gözlemlenmesi
 
 ## Bir Sonraki Adımlar
-1. Test verileriyle veritabanını doldurmak için veri aktarım işlemlerinin gerçekleştirilmesi
-2. Mevcut ML modellerinin Docker ortamında çalışacak şekilde yapılandırılması
-3. Model eğitim süreçlerinin Docker üzerinde test edilmesi
-4. Open-meteo API entegrasyonunun test edilmesi ve hava durumu verilerinin çekilmesi
-5. İnverter tahmin iş akışının uçtan uca test edilmesi
-6. API dokümantasyonunu tamamlama
-7. Hata yakalama ve loglama mekanizmalarını iyileştirme
+1. Yeni job yönetimi ve data processing yapısının test edilmesi
+2. API'lar arası entegrasyonların doğrulanması
+3. Yeni yapının kullanıcılara tanıtılması
+4. Hata yönetimi ve loglama sisteminin geliştirilmesi
+5. Docker imajlarının optimizasyonu
+6. Dokümantasyon ve API açıklamalarının geliştirilmesi
 
 ## Açık Sorular
-- Docker ortamında ML kütüphaneleri performans sorunlarına yol açabilir mi?
-- Konteynerler arası iletişimin gecikme süreleri optimum mu?
-- Docker imajlarının boyutu nasıl optimize edilebilir?
-- Model eğitimi için Docker üzerinde yeterli kaynak var mı yoksa modellerimiz için ayrı bir eğitim ortamı mı kurmalıyız?
-- Konteynerize edilmiş uygulamanın CI/CD pipeline'a nasıl entegre edilebileceği değerlendirilmeli
+- Yeni job yönetimi sistemi üretim ortamında nasıl performans gösterecek?
+- Kümülatif verilerin saatlik verilere dönüştürülmesi algoritması tüm senaryolarda doğru çalışıyor mu?
+- API'lar arası entegrasyonlar tüm durumlarda beklendiği gibi çalışıyor mu?
+- Gelecek hava durumu tahminlerinin çekilmesi ve işlenmesi ne kadar süre alıyor?
+- Kullanıcılar yeni sisteme nasıl alışacak ve ne tür dokümantasyon hazırlanmalı?
 
 ## Güncel Durum
-Backend API ve PostgreSQL veritabanı Docker konteynerlerinde başarıyla çalışıyor. API http://localhost:8000 adresinden erişilebilir durumda ve Swagger dokümantasyonu http://localhost:8000/docs adresinden incelenebilir. Veritabanı tabloları başarıyla oluşturuldu ve veritabanı bağlantısı sağlıklı bir şekilde çalışıyor. Şu anda sistem, inverter ve hava durumu verileri için veri girişine hazır durumda. Docker üzerinde çalışan bu yapı, geliştirme ve dağıtım süreçlerini önemli ölçüde kolaylaştırarak, farklı ortamlarda tutarlı bir şekilde çalışmayı sağlayacaktır. 
+Backend API, job yönetimi ve veri işleme geliştirmeleri tamamlandı. Kümülatif inverter verileri artık saatlik üretime doğru şekilde dönüştürülüyor. TXT yükleme, hava durumu verisi çekme ve model eğitimi işlemleri tek bir job içinde birleştirildi. Tüm job'ların durumu ve geçmişi merkezi bir şekilde yönetilebiliyor. Bir sonraki adım, yeni sistemin test edilmesi ve kullanıcılara tanıtılmasıdır. 

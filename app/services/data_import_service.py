@@ -8,9 +8,16 @@ from sqlalchemy import func
 import asyncio
 import uuid
 import time
+import logging
 
 from app.models.inverter import Inverter, InverterData
-from app.services.weather_service import fetch_historical_weather
+from app.models.weather import WeatherData
+from app.utils.data_processing import InverterDataProcessor
+from app.services.job_manager_service import get_job_manager
+from app.services.weather_service import fetch_historical_weather, fetch_weather_forecast
+
+# Logger yapılandırması
+logger = logging.getLogger(__name__)
 
 # İşlem durumunu takip etmek için global değişken
 active_txt_upload_jobs = {}
@@ -136,7 +143,10 @@ async def process_txt_data_job(
     job_id: str,
     txt_content: str,
     db_connection_string: str,
-    forced: bool = False
+    forced: bool = False,
+    fetch_weather: bool = True,
+    train_models: bool = False,
+    fetch_future_weather: bool = True
 ) -> Dict[str, Any]:
     """
     TXT dosyasından inverter verilerini arka planda işler ve veritabanına kaydeder.
@@ -146,11 +156,15 @@ async def process_txt_data_job(
         txt_content: TXT dosyası içeriği
         db_connection_string: Veritabanı bağlantı string'i
         forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
+        fetch_weather: Hava durumu verisi çekilsin mi?
+        train_models: Model eğitimi yapılsın mı?
+        fetch_future_weather: Gelecek hava durumu tahminleri çekilsin mi?
         
     Returns:
         İşlenen satır sayısı ve diğer bilgiler içeren bir sözlük
     """
     global active_txt_upload_jobs
+    job_manager = get_job_manager()
     
     # SqlAlchemy session oluştur
     from sqlalchemy import create_engine
@@ -161,12 +175,19 @@ async def process_txt_data_job(
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = SessionLocal()
     
+    # İstatistik değişkenleri
+    processed_rows = 0
+    conflict_count = 0
+    updated_count = 0
+    
     try:
         # İş durumunu güncelle
-        active_txt_upload_jobs[job_id]["status"] = "running"
-        active_txt_upload_jobs[job_id]["start_time"] = datetime.utcnow()
-        active_txt_upload_jobs[job_id]["message"] = "TXT dosyası işleniyor"
-        active_txt_upload_jobs[job_id]["progress"] = 5
+        job_manager.update_job(
+            job_id=job_id,
+            status="running",
+            progress=5,
+            message="TXT dosyası işleniyor"
+        )
         
         # TXT dosyasını oluştur
         from io import StringIO
@@ -175,8 +196,11 @@ async def process_txt_data_job(
         # TXT dosyasını tab ayraçlı olarak oku
         df = pd.read_csv(txt_file, sep='\t')
         
-        active_txt_upload_jobs[job_id]["progress"] = 10
-        active_txt_upload_jobs[job_id]["message"] = "TXT dosyası okundu, veri hazırlanıyor"
+        job_manager.update_job(
+            job_id=job_id,
+            progress=10,
+            message="TXT dosyası okundu, veri hazırlanıyor"
+        )
         
         # Boş sütunları kaldır
         df = df.dropna(axis=1, how='all')
@@ -193,51 +217,40 @@ async def process_txt_data_job(
         if not inverter_columns:
             raise ValueError("Hiç inverter veri sütunu (INV/#/DayEnergy) bulunamadı")
         
-        active_txt_upload_jobs[job_id]["progress"] = 20
-        active_txt_upload_jobs[job_id]["message"] = f"Veri hazırlandı, {len(inverter_columns)} inverter bulundu"
-        active_txt_upload_jobs[job_id]["total_inverters"] = len(inverter_columns)
+        job_manager.update_job(
+            job_id=job_id,
+            progress=20,
+            message=f"Veri hazırlandı, {len(inverter_columns)} inverter bulundu"
+        )
         
         # Eksik verileri 0 ile doldur
         df[inverter_columns] = df[inverter_columns].fillna(0)
         
-        # Veriyi 5 dakikalıktan saatlik formata çevir
-        hourly_df = convert_to_hourly(df, inverter_columns)
+        # Veriyi kümülatif değerlerden saatlik üretime dönüştür
+        hourly_df, conversion_stats = InverterDataProcessor.cumulative_to_hourly(df, inverter_columns)
         
-        active_txt_upload_jobs[job_id]["progress"] = 30
-        active_txt_upload_jobs[job_id]["message"] = "Veriler saatlik formata dönüştürüldü, inverterler kontrol ediliyor"
+        job_manager.update_job(
+            job_id=job_id,
+            progress=30,
+            message=f"Kümülatif veriler saatlik üretime dönüştürüldü: {conversion_stats['hourly_rows']} satır"
+        )
         
-        # Mevcut inverterleri kontrol et, yoksa oluştur
-        for col in inverter_columns:
-            # "INV/1/DayEnergy" formatından inverter id'yi çıkar
-            inv_id = int(col.split('/')[1])
-            
+        # İnverter kayıtlarını oluştur
+        for inv_id in range(1, 9):
             inverter = db.query(Inverter).filter(Inverter.id == inv_id).first()
             if not inverter:
-                # Yeni inverter oluştur
                 inverter = Inverter(
                     id=inv_id,
                     name=f"Inverter-{inv_id}",
-                    capacity=10.0,  # Varsayılan kapasite
-                    location=f"Location-{inv_id}",  # Varsayılan konum
+                    capacity=10.0,
+                    location=f"Location-{inv_id}",
                     is_active=True
                 )
                 db.add(inverter)
         
-        # İlk işlem için commit
         db.commit()
         
-        active_txt_upload_jobs[job_id]["progress"] = 40
-        active_txt_upload_jobs[job_id]["message"] = "İnverter kontrolleri tamamlandı, veriler yükleniyor"
-        
-        # Saatlik verileri veritabanına kaydet
-        processed_rows = 0
-        conflict_count = 0
-        updated_count = 0
-        total_rows = len(hourly_df) * len(inverter_columns)
-        
-        # Her bir satır için işlem yüzdesi
-        row_progress_step = 50 / total_rows if total_rows > 0 else 0
-        
+        # İnverter verilerini ekle
         for idx, row in enumerate(hourly_df.iterrows()):
             timestamp = row[1]['time']  # row[0] indeks, row[1] veri
             
@@ -271,12 +284,12 @@ async def process_txt_data_job(
                     processed_rows += 1
             
             # İlerlemeyi güncelle
-            progress = 40 + ((idx + 1) / len(hourly_df)) * 50
-            active_txt_upload_jobs[job_id]["progress"] = min(90, progress)
-            active_txt_upload_jobs[job_id]["message"] = f"Veriler yükleniyor: {idx + 1}/{len(hourly_df)} satır işlendi"
-            active_txt_upload_jobs[job_id]["processed_rows"] = processed_rows
-            active_txt_upload_jobs[job_id]["conflict_count"] = conflict_count
-            active_txt_upload_jobs[job_id]["updated_count"] = updated_count
+            progress = 40 + ((idx + 1) / len(hourly_df)) * 30
+            job_manager.update_job(
+                job_id=job_id,
+                progress=min(70, progress),
+                message=f"Veriler yükleniyor: {idx + 1}/{len(hourly_df)} satır işlendi"
+            )
             
             # Belirli aralıklarla commit yap
             if (idx + 1) % 50 == 0:
@@ -287,10 +300,113 @@ async def process_txt_data_job(
         # Kalan işlemler için commit
         db.commit()
         
-        active_txt_upload_jobs[job_id]["progress"] = 100
-        active_txt_upload_jobs[job_id]["status"] = "completed"
-        active_txt_upload_jobs[job_id]["end_time"] = datetime.utcnow()
-        active_txt_upload_jobs[job_id]["message"] = f"Veri yükleme tamamlandı: {processed_rows} satır eklendi, {conflict_count} çakışma, {updated_count} güncelleme"
+        job_manager.update_job(
+            job_id=job_id,
+            progress=70,
+            message=f"İnverter verileri yüklendi: {processed_rows} yeni, {conflict_count} çakışma, {updated_count} güncelleme"
+        )
+        
+        # Hava durumu verilerini çek
+        if fetch_weather:
+            job_manager.update_job(
+                job_id=job_id,
+                progress=75,
+                message="Hava durumu verileri çekiliyor..."
+            )
+            
+            try:
+                weather_result = await fetch_weather_data_for_dates(db)
+                job_manager.update_job(
+                    job_id=job_id,
+                    progress=80,
+                    message=f"Hava durumu verileri çekildi: {weather_result.get('weather_count', 0)} adet"
+                )
+            except Exception as e:
+                job_manager.update_job(
+                    job_id=job_id,
+                    progress=80,
+                    message=f"Hava durumu verileri çekilirken hata: {str(e)}",
+                    level="WARNING"
+                )
+        
+        # Model eğitimi yap
+        if train_models:
+            job_manager.update_job(
+                job_id=job_id,
+                progress=85,
+                message="Model eğitimi başlatılıyor..."
+            )
+            
+            try:
+                # Model eğitimi başlat
+                from app.services.model_training_service import start_all_models_training_job
+                
+                training_job_id = await start_all_models_training_job(
+                    db_connection_string=db_connection_string,
+                    test_split=True,
+                    test_size=0.2
+                )
+                
+                job_manager.update_job(
+                    job_id=job_id,
+                    progress=90,
+                    message=f"Model eğitimi başlatıldı. Eğitim job ID: {training_job_id}"
+                )
+                
+            except Exception as e:
+                job_manager.update_job(
+                    job_id=job_id,
+                    progress=90,
+                    message=f"Model eğitimi başlatılırken hata: {str(e)}",
+                    level="WARNING"
+                )
+        
+        # Gelecek hava durumu tahminlerini çek
+        if fetch_future_weather:
+            job_manager.update_job(
+                job_id=job_id,
+                progress=95,
+                message="Gelecek bir haftalık hava durumu tahminleri çekiliyor..."
+            )
+            
+            try:
+                from app.services.weather_service import fetch_weather_forecast
+                
+                # Inverter lokasyon bilgilerini al (sabit değerler)
+                latitude = 37.5704328  # Mersin
+                longitude = 34.1371146
+                forecast_days = 7
+                
+                # Hava durumu tahminlerini çek
+                forecast_response = await fetch_weather_forecast(
+                    latitude=latitude,
+                    longitude=longitude,
+                    forecast_days=forecast_days,
+                    db=db,
+                    save_to_db=True
+                )
+                
+                job_manager.update_job(
+                    job_id=job_id,
+                    progress=98,
+                    message=f"Gelecek hava durumu tahminleri çekildi"
+                )
+                
+            except Exception as e:
+                job_manager.update_job(
+                    job_id=job_id,
+                    progress=98,
+                    message=f"Gelecek hava durumu tahminleri çekilirken hata: {str(e)}",
+                    level="WARNING"
+                )
+        
+        # İşlemi tamamla
+        job_manager.update_job(
+            job_id=job_id,
+            status="completed",
+            progress=100,
+            message=f"Veri yükleme tamamlandı: {processed_rows} satır eklendi, {conflict_count} çakışma, {updated_count} güncelleme"
+        )
         
         # Sonuç istatistiklerini döndür
         result = {
@@ -298,6 +414,7 @@ async def process_txt_data_job(
             "conflict_count": conflict_count,
             "updated_count": updated_count,
             "total_inverters": len(inverter_columns),
+            "conversion_stats": conversion_stats,
             "date_range": {
                 "min_date": hourly_df['time'].min(),
                 "max_date": hourly_df['time'].max()
@@ -310,16 +427,19 @@ async def process_txt_data_job(
         # Hata durumunda rollback
         db.rollback()
         
-        active_txt_upload_jobs[job_id]["status"] = "failed"
-        active_txt_upload_jobs[job_id]["end_time"] = datetime.utcnow()
-        active_txt_upload_jobs[job_id]["message"] = f"Veri yükleme hatası: {str(e)}"
-        
-        # Stack trace'i de ekle
+        # Hata detaylarını job'a ekle
         import traceback
-        active_txt_upload_jobs[job_id]["error"] = traceback.format_exc()
+        error_trace = traceback.format_exc()
         
-        print(f"TXT veri yükleme hatası: {str(e)}")
-        print(traceback.format_exc())
+        job_manager.update_job(
+            job_id=job_id,
+            status="failed",
+            message=f"Veri yükleme hatası: {str(e)}",
+            level="ERROR"
+        )
+        
+        logger.error(f"TXT veri yükleme hatası: {str(e)}")
+        logger.error(error_trace)
         
         raise e
     finally:
@@ -330,7 +450,10 @@ async def start_txt_upload_job(
     txt_content: str,
     db_connection_string: str,
     file_name: str = None,
-    forced: bool = False
+    forced: bool = False,
+    fetch_weather: bool = True,
+    train_models: bool = False,
+    fetch_future_weather: bool = True
 ) -> str:
     """
     TXT dosyası yükleme işlemi başlatır.
@@ -340,27 +463,100 @@ async def start_txt_upload_job(
         db_connection_string: Veritabanı bağlantı string'i
         file_name: Dosya adı
         forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
+        fetch_weather: Hava durumu verisi çekilsin mi?
+        train_models: Model eğitimi yapılsın mı?
+        fetch_future_weather: Gelecek hava durumu tahminleri çekilsin mi?
         
     Returns:
         İş kimliği
     """
-    global active_txt_upload_jobs
+    # Job manager'ı al
+    job_manager = get_job_manager()
     
-    # İş kimliğini oluştur
-    job_id = f"txt_upload_{str(uuid.uuid4())[:8]}"
+    # Job parametrelerini oluştur
+    params = {
+        "file_name": file_name or "upload_via_api",
+        "forced": forced,
+        "fetch_weather": fetch_weather,
+        "train_models": train_models,
+        "fetch_future_weather": fetch_future_weather
+    }
     
-    # İş durumunu oluştur
+    # Job oluştur
+    job_id = job_manager.create_job(
+        job_type="txt_upload",
+        params=params,
+        description=f"TXT dosyası yükleme: {file_name or 'upload_via_api'}"
+    )
+    
+    # Eski job yapısına kaydet (geçici olarak, eski kodun çalışması için)
     active_txt_upload_jobs[job_id] = create_txt_upload_job_status(job_id, file_name)
     
-    # Asenkron olarak yükleme işlemini başlat
-    asyncio.create_task(process_txt_data_job(
+    # Job'ı başlat
+    await job_manager.start_job(
         job_id=job_id,
-        txt_content=txt_content,
-        db_connection_string=db_connection_string,
-        forced=forced
-    ))
+        task_func=lambda job_id, update_job: process_txt_data_job(
+            job_id=job_id,
+            txt_content=txt_content,
+            db_connection_string=db_connection_string,
+            forced=forced,
+            fetch_weather=fetch_weather,
+            train_models=train_models,
+            fetch_future_weather=fetch_future_weather
+        )
+    )
     
     return job_id
+
+async def process_txt_data(txt_file: io.StringIO, db: Session, forced: bool = False, 
+                          fetch_weather: bool = True, train_models: bool = False,
+                          fetch_future_weather: bool = True) -> Dict[str, Any]:
+    """
+    TXT dosyasından inverter verilerini işler ve veritabanına kaydeder.
+    Bu fonksiyon artık yeni asenkron job sistemini kullanır.
+    
+    TXT format beklentisi:
+    - İlk sütun: Zaman damgası
+    - Diğer sütunlar: INV/#/DayEnergy (kWh) formatında güç çıktısı değerleri
+    
+    Args:
+        txt_file: TXT dosyası içeriği
+        db: Veritabanı oturumu
+        forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
+        fetch_weather: Hava durumu verisi çekilsin mi?
+        train_models: Model eğitimi yapılsın mı?
+        fetch_future_weather: Gelecek hava durumu tahminleri çekilsin mi?
+        
+    Returns:
+        İşlenen satır sayısı ve diğer bilgiler içeren bir sözlük
+    """
+    from app.core.config import settings
+    
+    # Dosya içeriğini string olarak al
+    txt_content = txt_file.read()
+    
+    # Job başlat
+    job_id = await start_txt_upload_job(
+        txt_content=txt_content,
+        db_connection_string=str(settings.DATABASE_URL),
+        file_name="upload_via_api",
+        forced=forced,
+        fetch_weather=fetch_weather,
+        train_models=train_models,
+        fetch_future_weather=fetch_future_weather
+    )
+    
+    # Job durumunu kontrol et
+    job_status = get_job_manager().get_job_status(job_id)
+    
+    # Dummy sonuç döndür, gerçek işlem arka planda devam edecek
+    return {
+        "processed_rows": 0,
+        "conflict_count": 0,
+        "updated_count": 0,
+        "total_inverters": 0,
+        "job_id": job_id
+    }
 
 def get_txt_upload_job_status(job_id: str) -> Dict[str, Any]:
     """
@@ -372,16 +568,39 @@ def get_txt_upload_job_status(job_id: str) -> Dict[str, Any]:
     Returns:
         İş durumu
     """
+    # Eski job yapısı
     global active_txt_upload_jobs
     
-    if job_id not in active_txt_upload_jobs:
-        return {
-            "job_id": job_id,
-            "status": "not_found",
-            "message": "Belirtilen ID'ye sahip bir yükleme işi bulunamadı"
-        }
+    # Yeni job manager'ı kullan
+    job_manager = get_job_manager()
+    job_status = job_manager.get_job_status(job_id)
     
-    return active_txt_upload_jobs[job_id].copy()
+    # Eğer job bulunamadıysa
+    if job_status.get("status") == "not_found":
+        # Eski sistemde kontrol et
+        if job_id in active_txt_upload_jobs:
+            return active_txt_upload_jobs[job_id].copy()
+        else:
+            return {
+                "job_id": job_id,
+                "status": "not_found",
+                "message": "Belirtilen ID'ye sahip bir yükleme işi bulunamadı"
+            }
+    
+    # Job statüsünü TxtDataUploadJob formatına dönüştür
+    return {
+        "job_id": job_id,
+        "status": job_status.get("status"),
+        "progress": job_status.get("progress", 0),
+        "start_time": job_status.get("started_at"),
+        "end_time": job_status.get("completed_at"),
+        "message": job_status.get("logs", [])[-1]["message"] if job_status.get("logs") else "",
+        "processed_rows": job_status.get("result", {}).get("processed_rows", 0) if job_status.get("result") else 0,
+        "conflict_count": job_status.get("result", {}).get("conflict_count", 0) if job_status.get("result") else 0,
+        "updated_count": job_status.get("result", {}).get("updated_count", 0) if job_status.get("result") else 0,
+        "total_inverters": job_status.get("result", {}).get("total_inverters", 0) if job_status.get("result") else 0,
+        "file_name": job_status.get("params", {}).get("file_name") if job_status.get("params") else None
+    }
 
 def cleanup_old_txt_upload_jobs(max_age_hours: int = 24):
     """
@@ -410,52 +629,9 @@ def cleanup_old_txt_upload_jobs(max_age_hours: int = 24):
     
     return len(to_remove)
 
-async def process_txt_data(txt_file: io.StringIO, db: Session, forced: bool = False) -> Dict[str, Any]:
-    """
-    TXT dosyasından inverter verilerini işler ve veritabanına kaydeder.
-    Bu fonksiyon artık yeni asenkron job sistemini kullanır.
-    
-    TXT format beklentisi:
-    - İlk sütun: Zaman damgası
-    - Diğer sütunlar: INV/#/DayEnergy (kWh) formatında güç çıktısı değerleri
-    
-    Args:
-        txt_file: TXT dosyası içeriği
-        db: Veritabanı oturumu
-        forced: Aynı zaman dilimindeki verilerin üzerine yazılsın mı?
-        
-    Returns:
-        İşlenen satır sayısı ve diğer bilgiler içeren bir sözlük
-    """
-    from app.core.config import settings
-    
-    # Dosya içeriğini string olarak al
-    txt_content = txt_file.read()
-    
-    # Job başlat
-    job_id = await start_txt_upload_job(
-        txt_content=txt_content,
-        db_connection_string=str(settings.DATABASE_URL),
-        file_name="upload_via_api",
-        forced=forced
-    )
-    
-    # Job durumunu kontrol et
-    job_status = get_txt_upload_job_status(job_id)
-    
-    # Dummy sonuç döndür, gerçek işlem arka planda devam edecek
-    return {
-        "processed_rows": 0,
-        "conflict_count": 0,
-        "updated_count": 0,
-        "total_inverters": 0,
-        "job_id": job_id
-    }
-
 def convert_to_hourly(df: pd.DataFrame, inverter_columns: List[str]) -> pd.DataFrame:
     """
     5 dakikalık verileri saatlik verilere dönüştürür.
-    Her saat için son 3 değerin ortalamasını alır.
     
     Args:
         df: Orijinal veri çerçevesi
@@ -464,38 +640,8 @@ def convert_to_hourly(df: pd.DataFrame, inverter_columns: List[str]) -> pd.DataF
     Returns:
         Saatlik verilerden oluşan veri çerçevesi
     """
-    # Tarih sütununu saat başı olarak yuvarlama
-    df['hour'] = df['time'].dt.floor('H')
-    
-    # Saatlik gruplar oluşturulması
-    result_rows = []
-    
-    # Benzersiz saatleri al
-    unique_hours = df['hour'].unique()
-    
-    for hour in unique_hours:
-        # Bu saat için verileri filtrele
-        hour_data = df[df['hour'] == hour]
-        
-        # Son 3 değerin (varsa) alınması
-        last_rows = hour_data.tail(3)
-        
-        row_dict = {'time': hour}
-        
-        for col in inverter_columns:
-            # İnverter sütunu için son 3 değerin ortalaması
-            if not last_rows.empty:
-                avg_value = last_rows[col].mean()
-                row_dict[col] = avg_value
-            else:
-                row_dict[col] = 0
-        
-        result_rows.append(row_dict)
-    
-    # Yeni veri çerçevesi oluşturma
-    hourly_df = pd.DataFrame(result_rows)
-    
-    return hourly_df
+    # Yeni InverterDataProcessor sınıfını kullan
+    return InverterDataProcessor.cumulative_to_hourly(df, inverter_columns)[0]
 
 def validate_txt_data(txt_file: io.StringIO) -> Dict[str, Any]:
     """
