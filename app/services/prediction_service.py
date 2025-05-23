@@ -121,6 +121,9 @@ async def get_predictions(
                 # Gerekli özellikleri içeren DataFrame oluştur
                 if required_features:
                     feature_df = pd.DataFrame([{k: features.get(k, 0) for k in required_features}])
+                    logger.info(f"Gerekli özellikler: {required_features}")
+                    logger.info(f"Özellikler: {features}")
+                    logger.info(f"Feature DataFrame: {feature_df}")
                 else:
                     # Özellikler belirtilmemişse, tüm özellikleri kullan
                     feature_df = pd.DataFrame([features])
