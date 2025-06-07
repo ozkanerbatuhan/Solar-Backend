@@ -26,8 +26,7 @@ SOLAR_RADIATION_PARAMS = [
     "terrestrial_radiation",
     "temperature_2m",
     "relative_humidity_2m", 
-    "windspeed_10m",
-    "visibility"
+    "windspeed_10m"
 ]
 
 async def fetch_current_weather(
@@ -214,7 +213,7 @@ async def _save_weather_data(data: Dict[str, Any], db: Session, is_forecast: boo
             terrestrial_radiation=_get_value(hourly_data, "terrestrial_radiation", i),
             relative_humidity=_get_value(hourly_data, "relative_humidity_2m", i),
             wind_speed=_get_value(hourly_data, "windspeed_10m", i),
-            visibility=_get_value(hourly_data, "visibility", i),
+            visibility=None,  # Artık visibility kullanılmıyor
             is_forecast=1 if is_forecast else 0,
             additional_data={}  # Ek verileri buraya ekleyebiliriz
         )
@@ -274,7 +273,7 @@ async def _save_weather_forecast(data: Dict[str, Any], db: Session) -> int:
                 terrestrial_radiation=_get_value(hourly_data, "terrestrial_radiation", i),
                 relative_humidity=_get_value(hourly_data, "relative_humidity_2m", i),
                 wind_speed=_get_value(hourly_data, "windspeed_10m", i),
-                visibility=_get_value(hourly_data, "visibility", i),
+                visibility=None,  # Artık visibility kullanılmıyor
                 forecast_source="open-meteo",
                 additional_data={}  # Ek verileri buraya ekleyebiliriz
             )

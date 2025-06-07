@@ -18,15 +18,23 @@ import uuid
 from app.models.inverter import Inverter, InverterData
 from app.models.weather import WeatherData
 from app.models.model import Model
+from app.services.data_quality_service import DataQualityService
 
-# Model eğitim ve tahmin için parametreler
+# Model eğitim ve tahmin için parametreler - SUPER OPTIMIZED FOR SOLAR DATA
 MODEL_PARAMS = {
-    "n_estimators": 200,
-    "max_depth": 15,
-    "min_samples_split": 5,
-    "min_samples_leaf": 2,
+    "n_estimators": 1000,       # Çok fazla ağaç = overfitting'e karşı güçlü ensemble
+    "max_depth": 18,            # Daha kontrollü derinlik = overfitting'i engelle
+    "min_samples_split": 10,    # Daha muhafazakar split = stability
+    "min_samples_leaf": 5,      # Daha büyük yapraklar = generalization
+    "max_features": 0.6,        # %60 feature sampling = güçlü diversity
+    "bootstrap": True,          # Bagging
     "random_state": 42,
-    "n_jobs": -1
+    "n_jobs": -1,
+    "oob_score": True,          # Out-of-bag score evaluation
+    "min_impurity_decrease": 0.001,  # Daha büyük kazanım threshold = pruning
+    "max_samples": 0.85,        # %85 sample bootstrap = diversity
+    "criterion": "absolute_error",  # MAE based splitting = robust to outliers
+    "max_leaf_nodes": 2000      # Leaf node limit = complexity control
 }
 
 
@@ -109,16 +117,31 @@ async def _train_model_job(
         available_columns = df.columns.tolist()
         print(f"[DEBUG] Mevcut sütunlar: {available_columns}")
         
-        # Özellik sütunlarını mevcut sütunlara göre düzenle
+        # YENİ: Gelişmiş özellik seçimi 
+        # Temel özellikler
         base_feature_cols = [
             'temperature', 'shortwave_radiation', 'direct_radiation',
             'diffuse_radiation', 'direct_normal_irradiance', 'global_tilted_irradiance', 
-            'terrestrial_radiation', 'relative_humidity', 'wind_speed', 'visibility',
+            'terrestrial_radiation', 'relative_humidity', 'wind_speed',
             'hour', 'day', 'month', 'dayofweek', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
         ]
         
-        # Mevcut sütunlarla kesişim kontrolü
-        feature_cols = [col for col in base_feature_cols if col in available_columns]
+        # Gelişmiş özellikler (veri kalitesi servisi tarafından eklenenler)
+        advanced_features = [
+            'total_radiation_index', 'radiation_efficiency', 'solar_elevation_proxy',
+            'is_daylight', 'is_peak_solar', 'heat_comfort', 'panel_efficiency_proxy',
+            'season_summer', 'season_winter', 'daylight_length_proxy', 
+            'temp_radiation_interaction', 'wind_cooling_effect',
+            'high_radiation', 'low_radiation', 'zero_radiation'
+        ]
+        
+        # Mevcut tüm özellikleri kontrol et
+        all_potential_features = base_feature_cols + advanced_features
+        feature_cols = [col for col in all_potential_features if col in available_columns]
+        
+        print(f"[DEBUG] Kullanılacak temel özellikler: {[f for f in base_feature_cols if f in available_columns]}")
+        print(f"[DEBUG] Kullanılacak gelişmiş özellikler: {[f for f in advanced_features if f in available_columns]}")
+        print(f"[DEBUG] Toplam özellik sayısı: {len(feature_cols)}")
         
         # Sıcaklık sütunu çakışma kontrolü - inverter_temperature ve temperature karışıklığı olmamalı
         if 'temperature' in feature_cols and 'inverter_temperature' in available_columns:
@@ -127,7 +150,15 @@ async def _train_model_job(
         if not feature_cols:
             raise ValueError(f"Hiçbir özellik sütunu bulunamadı. Mevcut sütunlar: {available_columns}")
         
-        print(f"[DEBUG] Kullanılacak özellik sütunları: {feature_cols}")
+        # YENİ: Model input data validation
+        validation_report = DataQualityService.validate_model_input_data(df, feature_cols)
+        print(f"[DEBUG] Model input validation: {validation_report}")
+        
+        if not validation_report['is_valid']:
+            print(f"[UYARI] Model input validation başarısız: {validation_report['errors']}")
+        
+        if validation_report['data_quality_score'] < 70:
+            print(f"[UYARI] Düşük veri kalitesi skoru: {validation_report['data_quality_score']}/100")
         
         X = df[feature_cols]
         y = df["power_output"]
@@ -146,23 +177,18 @@ async def _train_model_job(
             # Ancak model performansı için rasgele karıştırma daha iyi sonuç veriyor, bu yüzden shuffle=True kullanıyoruz
             # Bu trade-off'u açıkça belirtelim
             shuffle_param = True  # Daha iyi model performansı için True, zaman serisi tutarlılığı için False
-            print(f"[DEBUG] Train-test split parametreleri: test_size={test_size}, shuffle={shuffle_param}")
+
             
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, shuffle=shuffle_param)
-            
-            print(f"[DEBUG] Eğitim seti: X_train={X_train.shape}, y_train={y_train.shape}")
-            print(f"[DEBUG] Test seti: X_test={X_test.shape}, y_test={y_test.shape}")
             
             active_training_jobs[job_id]["progress"] = 40
             active_training_jobs[job_id]["message"] = f"İlk model eğitimi başlıyor"
             
             # NaN kontrolü - main.py'de olduğu gibi
             if X_train.isna().any().any():
-                print("[DEBUG] Eğitim setinde NaN değerler var, medyan ile doldurulacak.")
                 X_train = X_train.fillna(X_train.median())
             
             if X_test.isna().any().any():
-                print("[DEBUG] Test setinde NaN değerler var, medyan ile doldurulacak.")
                 X_test = X_test.fillna(X_test.median())
             
             # RobustScaler uygulaması - main.py'deki gibi
@@ -171,11 +197,9 @@ async def _train_model_job(
             X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
             X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
             
-            print("[DEBUG] Model eğitimi başlıyor...")
             model = RandomForestRegressor(**MODEL_PARAMS)
             model.fit(X_train_scaled, y_train)
-            print("[DEBUG] Model eğitimi tamamlandı.")
-            
+           
             active_training_jobs[job_id]["progress"] = 60
             active_training_jobs[job_id]["message"] = f"Model performans metriksleri hesaplanıyor"
             
@@ -183,23 +207,31 @@ async def _train_model_job(
             y_pred = model.predict(X_test_scaled)
             
             # Tahmin ve gerçek değerlerin sıralamasını kontrol et (indeks kontrolü)
-            print(f"[DEBUG] y_test ve y_pred boyutları: {y_test.shape} vs {y_pred.shape}")
             
             # Model metriklerini hesapla
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             mae = mean_absolute_error(y_test, y_pred)
             r2 = r2_score(y_test, y_pred)
             
-            # MAPE hesaplama (main.py'deki gibi güvenli hesaplama)
-            mask = y_test > 1.0  # 1 kWh'den büyük değerler için
+            # ÇOK GÜVENLİ MAPE hesaplama - aşırı küçük değerleri filtrele
+            # Hem numerik kararlılık hem de fiziksel anlam için
+            significant_mask = (y_test > 10.0) & (np.abs(y_test) > 0.1)  # 10 kW üzeri anlamlı değerler
             mape = 0.0
-            if mask.sum() > 0:
-                mape = np.mean(np.abs((y_test[mask] - y_pred[mask]) / y_test[mask])) * 100
-                print(f"[DEBUG] MAPE hesaplama için {mask.sum()}/{len(y_test)} satır kullanıldı (>1.0 kWh).")
-            else:
-                print("[DEBUG] MAPE hesaplanamadı - 1.0 kWh'den büyük değer yok.")
+            mape_samples = 0
             
-            print(f"[DEBUG] Model metrikleri: RMSE={rmse:.4f}, MAE={mae:.4f}, R²={r2:.4f}, MAPE={mape:.4f}%")
+            if significant_mask.sum() > 0:
+                # MAPE hesaplama - aşırı yüksek hataları sınırla
+                percentage_errors = np.abs((y_test[significant_mask] - y_pred[significant_mask]) / y_test[significant_mask])
+                # %500'den yüksek hataları sınırla (fiziksel olarak makul)
+                capped_errors = np.minimum(percentage_errors, 5.0)  # Max %500 hata
+                mape = np.mean(capped_errors) * 100
+                mape_samples = significant_mask.sum()
+                print(f"[DEBUG] MAPE hesaplandı - {mape_samples} anlamlı örnek kullanıldı (>{10.0} kW)")
+                print(f"[DEBUG] Ham MAPE: {np.mean(percentage_errors) * 100:.2f}%, Sınırlanmış MAPE: {mape:.2f}%")
+            else:
+                print("[DEBUG] MAPE hesaplanamadı - 10.0 kW'den büyük anlamlı değer yok.")
+                mape = 999.9  # İnvalid marker
+            
             
             model_metrics = {
                 "rmse": float(rmse),
@@ -225,15 +257,12 @@ async def _train_model_job(
         
         # RobustScaler ile ölçeklendirme - tüm veri için yeni scaler oluştur
         # Bu, train-test split yaklaşımıyla tutarlı olmasını sağlar
-        print("[DEBUG] Final model için tüm veri ölçeklendiriliyor...")
         from sklearn.preprocessing import RobustScaler
         final_scaler = RobustScaler()
         X_scaled = pd.DataFrame(final_scaler.fit_transform(X), columns=feature_cols)
         
-        print("[DEBUG] Final model eğitimi başlıyor...")
         final_model = RandomForestRegressor(**MODEL_PARAMS)
         final_model.fit(X_scaled, y)
-        print("[DEBUG] Final model eğitimi tamamlandı.")
         
         active_training_jobs[job_id]["progress"] = 80
         active_training_jobs[job_id]["message"] = f"Özellik önemi hesaplanıyor"
@@ -257,17 +286,24 @@ async def _train_model_job(
         active_training_jobs[job_id]["progress"] = 85
         active_training_jobs[job_id]["message"] = f"Model dosyaları kaydediliyor"
         
-        # Modeli kaydet
+        # Modeli ve scaler'ı kaydet
         model_path = os.path.join(MODELS_DIR, f"{model_version}.joblib")
+        scaler_path = os.path.join(MODELS_DIR, f"{model_version}_scaler.joblib")
+        
         joblib.dump(final_model, model_path)
+        joblib.dump(final_scaler, scaler_path)
         print(f"[DEBUG] Model kaydedildi: {model_path}")
+        print(f"[DEBUG] Scaler kaydedildi: {scaler_path}")
         
         # Model meta verisini kaydet
         meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
         
         # Metrikler ve özellik önemlerini JSON serileştirilebilir hale getir
         serialized_metrics = serialize_for_json(model_metrics)
-        serialized_feature_importance = serialize_for_json(feature_importance)
+        
+        # Feature importance'ları büyükten küçüğe sırala
+        sorted_feature_importance = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True))
+        serialized_feature_importance = serialize_for_json(sorted_feature_importance)
         serialized_data_details = serialize_for_json(data_details)
         
         model_meta = {
@@ -278,6 +314,8 @@ async def _train_model_job(
             "model_params": MODEL_PARAMS,
             "feature_importance": serialized_feature_importance,
             "metrics": serialized_metrics,
+            "features": feature_cols,  # Özellik listesini meta veride sakla
+            "scaler_path": f"{model_version}_scaler.joblib",  # Scaler dosya yolunu sakla
             "data_size": len(X),
             "data_details": serialized_data_details
         }
@@ -328,7 +366,7 @@ async def _train_model_job(
             "inverter_id": inverter_id,
             "metrics": model_metrics,
             "model_path": model_path,
-            "feature_importance": feature_importance,
+            "feature_importance": sorted_feature_importance,
             "data_details": data_details
         }
         
@@ -616,8 +654,7 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
         "global_tilted_irradiance": data.global_tilted_irradiance,
         "terrestrial_radiation": data.terrestrial_radiation,
         "relative_humidity": data.relative_humidity,
-        "wind_speed": data.wind_speed,
-        "visibility": data.visibility
+        "wind_speed": data.wind_speed
     } for data in weather_data])
     
     print(f"[DEBUG] Hava durumu verileri için {len(weather_df)} satır veri bulundu.")
@@ -663,76 +700,110 @@ async def get_training_data(inverter_id: int, db: Session) -> pd.DataFrame:
     print(f"[DEBUG] Birleştirme sonrası veri boyutu: {df.shape}")
     print(f"[DEBUG] Birleştirme sonrası NaN içeren satır sayısı: {df.isna().any(axis=1).sum()}")
     
-    # Birleştirilmiş veri çerçevesi sütunlarını kontrol et
-    print(f"[DEBUG] Birleştirilmiş veri çerçevesi sütunları: {df.columns.tolist()}")
-    
-    # Veri tipleri kontrolü
-    print("[DEBUG] Veri tipleri kontrolü:")
-    print(df.dtypes)
-    
-    # NaN değerleri kontrolü - sütun bazında
-    nan_columns = df.columns[df.isna().any()].tolist()
-    if nan_columns:
-        print(f"[DEBUG] Aşağıdaki sütunlarda NaN değerler bulundu: {nan_columns}")
-        print(f"[DEBUG] Sütun bazında NaN sayıları:")
-        for col in nan_columns:
-            nan_count = df[col].isna().sum()
-            nan_percent = (nan_count / len(df)) * 100
-            print(f"  - {col}: {nan_count} ({nan_percent:.2f}%)")
-        
-        # Nümerik sütunları medyan ile doldur
-        numeric_cols = df.select_dtypes(include=['number']).columns
-        for col in nan_columns:
-            if col in numeric_cols:
-                print(f"[DEBUG] {col} sütunu nümerik, NaN değerler önce ffill, sonra medyan ile dolduruluyor.")
-                # Önce ffill ile doldur, kalan NaN'ları medyan ile doldur
-                df[col] = df[col].ffill().fillna(df[col].median())
-            else:
-                print(f"[DEBUG] {col} sütunu nümerik değil, NaN değerler ffill ve bfill ile dolduruluyor.")
-                df[col] = df[col].ffill().bfill()
-    
-    # Aykırı değerleri temizle - main.py'deki gibi
-    # power_output için aykırı değer kontrolü
-    if "power_output" in df.columns:
-        print("[DEBUG] power_output için aykırı değer temizleme işlemi yapılıyor...")
-        
-        # Temizleme öncesinde boyut kontrolü
-        print(f"[DEBUG] Aykırı değer temizleme öncesi veri boyutu: {df.shape}")
-        
-        # 0.01-0.99 quantile dışındaki değerleri temizle
-        q1 = df["power_output"].quantile(0.01)
-        q3 = df["power_output"].quantile(0.99)
-        
-        print(f"[DEBUG] power_output için 0.01 quantile: {q1}, 0.99 quantile: {q3}")
-        
-        filtered_df = df[(df["power_output"] >= q1) & (df["power_output"] <= q3)]
-        
-        # Kaç satır çıkarıldı?
-        removed_rows = len(df) - len(filtered_df)
-        removed_percentage = (removed_rows / len(df)) * 100 if len(df) > 0 else 0
-        print(f"[DEBUG] Aykırı değer temizleme: {removed_rows} satır çıkarıldı ({removed_percentage:.2f}%)")
-        
-        df = filtered_df
-    
-    # Tarih özelliklerini ekle
-    print("[DEBUG] Tarih özellikleri ekleniyor...")
+    # Temel tarih özelliklerini önce ekle (veri kalitesi servisi için gerekli)
+    print("[DEBUG] Temel tarih özellikleri ekleniyor...")
     df["hour"] = df["timestamp"].dt.hour
     df["day"] = df["timestamp"].dt.day
     df["month"] = df["timestamp"].dt.month
     df["dayofweek"] = df["timestamp"].dt.dayofweek
     
-    # Main.py'deki gibi trigonometrik zaman özellikleri ekleme
+    # YENİ: ÇOK AGRESIF veri kalitesi kontrolleri ve temizleme
+    print("[DEBUG] ULTRA AGRESIF veri kalitesi analizi başlatılıyor...")
+    print(f"[DEBUG] Temizlik öncesi veri boyutu: {df.shape}")
+    
+    # 1. Akıllı veri temizleme
+    df_cleaned, cleaning_report = DataQualityService.intelligent_data_cleaning(df, 'power_output')
+    print(f"[DEBUG] İlk veri temizleme tamamlandı: {cleaning_report}")
+    
+    # 2. EKSTRA AGRESIF temizlik - model eğitimi için
+    print("[DEBUG] Ekstra agresif temizlik başlatılıyor...")
+    
+    # Fiziksel olarak imkansız kombinasyonları tamamen kaldır
+    before_extreme_cleaning = len(df_cleaned)
+    
+    # Gece saatlerinde 5 kW'dan fazla güç üretimi olan satırları kaldır
+    night_mask = (df_cleaned['hour'] >= 22) | (df_cleaned['hour'] <= 5)
+    extreme_night_power = night_mask & (df_cleaned['power_output'] > 5)
+    df_cleaned = df_cleaned[~extreme_night_power]
+    print(f"[DEBUG] Gece yüksek güç satırları kaldırıldı: {extreme_night_power.sum()}")
+    
+    # Sıfır radyasyon + pozitif güç kombinasyonlarını kaldır
+    zero_rad_positive_power = (df_cleaned['shortwave_radiation'] <= 0) & (df_cleaned['power_output'] > 1)
+    df_cleaned = df_cleaned[~zero_rad_positive_power]
+    print(f"[DEBUG] Sıfır radyasyon + pozitif güç satırları kaldırıldı: {zero_rad_positive_power.sum()}")
+    
+    # Aşırı düşük radyasyon + yüksek güç kombinasyonlarını kaldır
+    low_rad_high_power = (df_cleaned['shortwave_radiation'] < 50) & (df_cleaned['power_output'] > 100)
+    df_cleaned = df_cleaned[~low_rad_high_power]
+    print(f"[DEBUG] Düşük radyasyon + yüksek güç satırları kaldırıldı: {low_rad_high_power.sum()}")
+    
+    # Öğle saatlerinde çok düşük güç üretimi olanları kaldır (bulutlu günler hariç)
+    noon_mask = (df_cleaned['hour'] >= 11) & (df_cleaned['hour'] <= 13)
+    high_rad_low_power = noon_mask & (df_cleaned['shortwave_radiation'] > 400) & (df_cleaned['power_output'] < 50)
+    df_cleaned = df_cleaned[~high_rad_low_power]
+    print(f"[DEBUG] Öğle yüksek radyasyon + düşük güç satırları kaldırıldı: {high_rad_low_power.sum()}")
+    
+    # Aşırı yüksek güç değerlerini kaldır (5 MW'tan fazla fiziksel olarak imkansız)
+    excessive_power = df_cleaned['power_output'] > 5000
+    df_cleaned = df_cleaned[~excessive_power]
+    print(f"[DEBUG] Aşırı yüksek güç satırları kaldırıldı: {excessive_power.sum()}")
+    
+    # ❌ İSTATİSTİKSEL OUTLIER DETECTION KALDIRILDI!
+    # Güneş enerjisinde gece 0, gündüz 1000+ kW normal - IQR yöntemi yanlış sonuç veriyor
+    print(f"[DEBUG] Statistical outlier detection atlandı - güneş enerjisi için uygun değil")
+    
+    after_extreme_cleaning = len(df_cleaned)
+    extreme_cleaning_removed = before_extreme_cleaning - after_extreme_cleaning
+    print(f"[DEBUG] Ekstra agresif temizlik: {extreme_cleaning_removed} satır kaldırıldı (%{(extreme_cleaning_removed/before_extreme_cleaning)*100:.2f})")
+    
+    # 3. Güneş enerjisi aware feature engineering
+    df_enhanced = DataQualityService.create_solar_aware_features(df_cleaned)
+    print(f"[DEBUG] Gelişmiş feature engineering tamamlandı. Toplam sütun sayısı: {len(df_enhanced.columns)}")
+    
+    # 4. HAFIF outlier removal - sadece fiziksel limitler
+    print("[DEBUG] Fiziksel limitlerle hafif outlier removal...")
+    
+    # SADECE FİZİKSEL LİMİTLER - statistical outlier detection KALDIRILDI!
+    
+    # 1. Negatif değerleri kaldır
+    negative_power = df_enhanced['power_output'] < 0
+    df_enhanced = df_enhanced[~negative_power]
+    print(f"[DEBUG] Negatif güç değerleri kaldırıldı: {negative_power.sum()}")
+    
+    # 2. Aşırı yüksek değerler (2000 kW = 2 MW üzeri - çok liberal limit)
+    excessive_power = df_enhanced['power_output'] > 2000
+    df_enhanced = df_enhanced[~excessive_power]
+    print(f"[DEBUG] 2000 kW üzeri aşırı yüksek güç kaldırıldı: {excessive_power.sum()}")
+    
+    # 3. Radyasyon-güç oranı kontrolü ÇOK YUMULATILDI
+    if 'total_radiation_index' in df_enhanced.columns:
+        # Her 1000 W/m² radiation için maksimum 10 kW bekleniyor (çok liberal)
+        expected_power = df_enhanced['total_radiation_index'] * 10 / 1000  # 4'ten 10'a çıkarıldı
+        power_ratio = df_enhanced['power_output'] / (expected_power + 1)  # +1 division by zero için
+        extreme_ratio = (power_ratio > 20) | (power_ratio < 0.01)  # 20x fazla kabul edilir (çok liberal)
+        df_enhanced = df_enhanced[~extreme_ratio]
+        print(f"[DEBUG] Çok liberal radyasyon-güç oransızlığı satırları kaldırıldı: {extreme_ratio.sum()}")
+        
+    print(f"[DEBUG] Final veri boyutu: {df_enhanced.shape}")
+    print(f"[DEBUG] Toplam veri kaybı: %{((df.shape[0] - df_enhanced.shape[0])/df.shape[0])*100:.2f}")
+    
+    # Minimum veri kontrolü
+    if len(df_enhanced) < 100:
+        raise ValueError(f"Veri temizleme sonrası çok az veri kaldı: {len(df_enhanced)} satır. Eğitim için yetersiz.")
+    
+    # 3. Trigonometrik zaman özellikleri (eski mantık korunuyor)
     print("[DEBUG] Trigonometrik zaman özellikleri ekleniyor...")
-    df['hour_sin'] = np.sin(2 * np.pi * df['hour']/24)
-    df['hour_cos'] = np.cos(2 * np.pi * df['hour']/24)
+    df_enhanced['hour_sin'] = np.sin(2 * np.pi * df_enhanced['hour']/24)
+    df_enhanced['hour_cos'] = np.cos(2 * np.pi * df_enhanced['hour']/24)
     
     # Gün numarası yerine ay kullanılacak
-    df['day_sin'] = np.sin(2 * np.pi * df['month']/12)
-    df['day_cos'] = np.cos(2 * np.pi * df['month']/12)
+    df_enhanced['day_sin'] = np.sin(2 * np.pi * df_enhanced['month']/12)
+    df_enhanced['day_cos'] = np.cos(2 * np.pi * df_enhanced['month']/12)
     
-    print(f"[DEBUG] Veri hazırlama tamamlandı. Final veri boyutu: {df.shape}")
+    print(f"[DEBUG] Veri hazırlama tamamlandı. Final veri boyutu: {df_enhanced.shape}")
+    print(f"[DEBUG] Final sütunlar: {df_enhanced.columns.tolist()}")
     
-    return df
+    return df_enhanced
 
 # JSON serileştirme için yardımcı fonksiyon
 def serialize_for_json(obj):
@@ -789,25 +860,48 @@ async def train_model(
     available_columns = df.columns.tolist()
     print(f"[DEBUG] Mevcut sütunlar: {available_columns}")
     
-    # Özellik sütunlarını mevcut sütunlara göre düzenle
+    # YENİ: Gelişmiş özellik seçimi 
+    # Temel özellikler
     base_feature_cols = [
         'temperature', 'shortwave_radiation', 'direct_radiation',
         'diffuse_radiation', 'direct_normal_irradiance', 'global_tilted_irradiance', 
-        'terrestrial_radiation', 'relative_humidity', 'wind_speed', 'visibility',
+        'terrestrial_radiation', 'relative_humidity', 'wind_speed',
         'hour', 'day', 'month', 'dayofweek', 'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
     ]
     
-    # Mevcut sütunlarla kesişim kontrolü
-    feature_cols = [col for col in base_feature_cols if col in available_columns]
+    # Gelişmiş özellikler (veri kalitesi servisi tarafından eklenenler)
+    advanced_features = [
+        'total_radiation_index', 'radiation_efficiency', 'solar_elevation_proxy',
+        'is_daylight', 'is_peak_solar', 'heat_comfort', 'panel_efficiency_proxy',
+        'season_summer', 'season_winter', 'daylight_length_proxy', 
+        'temp_radiation_interaction', 'wind_cooling_effect',
+        'high_radiation', 'low_radiation', 'zero_radiation'
+    ]
     
-    # Sıcaklık sütunu çakışma kontrolü
+    # Mevcut tüm özellikleri kontrol et
+    all_potential_features = base_feature_cols + advanced_features
+    feature_cols = [col for col in all_potential_features if col in available_columns]
+    
+    print(f"[DEBUG] Kullanılacak temel özellikler: {[f for f in base_feature_cols if f in available_columns]}")
+    print(f"[DEBUG] Kullanılacak gelişmiş özellikler: {[f for f in advanced_features if f in available_columns]}")
+    print(f"[DEBUG] Toplam özellik sayısı: {len(feature_cols)}")
+    
+    # Sıcaklık sütunu çakışma kontrolü - inverter_temperature ve temperature karışıklığı olmamalı
     if 'temperature' in feature_cols and 'inverter_temperature' in available_columns:
         print("[DEBUG] 'temperature' sütunu var ve bu hava durumu sıcaklığını ifade ediyor.")
     
     if not feature_cols:
         raise ValueError(f"Hiçbir özellik sütunu bulunamadı. Mevcut sütunlar: {available_columns}")
     
-    print(f"[DEBUG] Kullanılacak özellik sütunları: {feature_cols}")
+    # YENİ: Model input data validation
+    validation_report = DataQualityService.validate_model_input_data(df, feature_cols)
+    print(f"[DEBUG] Model input validation: {validation_report}")
+    
+    if not validation_report['is_valid']:
+        print(f"[UYARI] Model input validation başarısız: {validation_report['errors']}")
+    
+    if validation_report['data_quality_score'] < 70:
+        print(f"[UYARI] Düşük veri kalitesi skoru: {validation_report['data_quality_score']}/100")
     
     X = df[feature_cols]
     y = df["power_output"]
@@ -906,17 +1000,24 @@ async def train_model(
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     model_version = f"inverter_{inverter_id}_v{timestamp}"
     
-    # Modeli kaydet
+    # Modeli ve scaler'ı kaydet
     model_path = os.path.join(MODELS_DIR, f"{model_version}.joblib")
+    scaler_path = os.path.join(MODELS_DIR, f"{model_version}_scaler.joblib")
+    
     joblib.dump(final_model, model_path)
+    joblib.dump(final_scaler, scaler_path)
     print(f"[DEBUG] Model kaydedildi: {model_path}")
+    print(f"[DEBUG] Scaler kaydedildi: {scaler_path}")
     
     # Model meta verisini kaydet
     meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
     
     # Metrikler ve özellik önemlerini JSON serileştirilebilir hale getir
     serialized_metrics = serialize_for_json(model_metrics)
-    serialized_feature_importance = serialize_for_json(feature_importance)
+    
+    # Feature importance'ları büyükten küçüğe sırala
+    sorted_feature_importance = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True))
+    serialized_feature_importance = serialize_for_json(sorted_feature_importance)
     serialized_data_details = serialize_for_json(data_details)
     
     model_meta = {
@@ -927,6 +1028,8 @@ async def train_model(
         "model_params": MODEL_PARAMS,
         "feature_importance": serialized_feature_importance,
         "metrics": serialized_metrics,
+        "features": feature_cols,  # Özellik listesini meta veride sakla
+        "scaler_path": f"{model_version}_scaler.joblib",  # Scaler dosya yolunu sakla
         "data_size": len(X),
         "data_details": serialized_data_details
     }

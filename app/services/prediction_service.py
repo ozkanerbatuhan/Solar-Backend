@@ -14,6 +14,7 @@ from app.models.model import Model
 from app.models.weather import WeatherForecast
 from app.core.config import settings
 from app.services.weather_service import fetch_weather_forecast
+from app.services.data_quality_service import DataQualityService
 import logging
 
 # Log yapılandırması
@@ -51,6 +52,11 @@ async def get_predictions(
     if end_date is None:
         end_date = start_date + timedelta(days=7)
     
+    # Tarihleri tam saat olarak normalize et
+    start_date = start_date.replace(minute=0, second=0, microsecond=0)
+    end_date = end_date.replace(minute=0, second=0, microsecond=0)
+    
+    logger.info(f"Normalize edilmiş tarih aralığı: {start_date} - {end_date}")
     
     # Inverter var mı kontrol et
     try:
@@ -65,13 +71,13 @@ async def get_predictions(
     
     # Aktif modeli yükle
     try:
-        model, model_meta = await load_model(inverter_id, db)
+        model, scaler, model_meta = await load_model(inverter_id, db)
         
     except Exception as e:
         logger.error(f"Model yükleme hatası: {str(e)}")
         if db and db.is_active:
             db.rollback()
-        model, model_meta = None, None
+        model, scaler, model_meta = None, None, None
     
     if model is None:
         # Model yoksa basit bir tahmin serisi oluştur
@@ -115,8 +121,13 @@ async def get_predictions(
                 # Tahmin için özellikleri hazırla
                 features = _prepare_features(weather_data, current_time)
                 
+                # Veri kalitesi kontrolü
+                quality_issues = _check_data_quality(weather_data, current_time)
+                if quality_issues:
+                    logger.warning(f"Veri kalitesi sorunları tespit edildi ({current_time}): {quality_issues}")
+                
                 # Modelin beklediği özellikleri al
-                required_features = model_meta.get("metrics", {}).get("features", [])
+                required_features = model_meta.get("features", [])
                 
                 # Gerekli özellikleri içeren DataFrame oluştur
                 if required_features:
@@ -128,11 +139,36 @@ async def get_predictions(
                     # Özellikler belirtilmemişse, tüm özellikleri kullan
                     feature_df = pd.DataFrame([features])
                 
-                # Tahmin yap
-                predicted_power = float(model.predict(feature_df)[0])
+                # Scaler kullanarak özellikleri ölçekle
+                if scaler is not None:
+                    try:
+                        feature_df_scaled = pd.DataFrame(
+                            scaler.transform(feature_df),
+                            columns=feature_df.columns
+                        )
+                        logger.info("Özellikler scaler ile ölçeklendirildi")
+                    except Exception as scale_error:
+                        logger.warning(f"Scaler hatası: {str(scale_error)}, ham özellikler kullanılacak")
+                        feature_df_scaled = feature_df
+                else:
+                    logger.warning("Scaler bulunamadı, ham özellikler kullanılacak")
+                    feature_df_scaled = feature_df
                 
-                # Tahmin güven değeri (şu an için sabit)
+                # Tahmin yap
+                predicted_power = float(model.predict(feature_df_scaled)[0])
+                
+                # YENİ: Fiziksel kısıtlar ve post-processing
+                predicted_power = _apply_prediction_constraints(predicted_power, features, current_time)
+                
+                # Tahmin güven değeri (veri kalitesine göre ayarlanabilir)
                 confidence = 0.9
+                if quality_issues:
+                    confidence = max(0.5, confidence - len(quality_issues) * 0.1)
+                
+                # Model kalitesi kontrolü
+                if 'data_quality_score' in locals():
+                    quality_factor = min(1.0, locals()['data_quality_score'] / 100)
+                    confidence *= quality_factor
                 
                 # Tahmin kaydını oluştur ve kaydet
                 prediction = InverterPrediction(
@@ -215,14 +251,14 @@ async def get_prediction(
 
 async def load_model(inverter_id: int, db: Session) -> tuple:
     """
-    Belirtilen inverter için makine öğrenimi modelini yükler.
+    Belirtilen inverter için makine öğrenimi modelini ve scaler'ını yükler.
     
     Args:
         inverter_id: Model yüklenecek inverter ID'si
         db: Veritabanı oturumu
     
     Returns:
-        tuple: (model, model_meta) - Yüklenen model ve meta verileri
+        tuple: (model, scaler, model_meta) - Yüklenen model, scaler ve meta verileri
     """
     try:
         # Inverter için aktif modeli kontrol et
@@ -232,12 +268,12 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
         ).first()
         
         if active_model is None:
-            return None, None
+            return None, None, None
         
         # Model dosyasının yolunu oluştur
         model_path = active_model.model_path
         if not model_path:
-            return None, None
+            return None, None, None
         
         # Tam dosya yolunu oluştur
         full_model_path = os.path.join(MODELS_DIR, model_path)
@@ -246,12 +282,24 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
         model_version = active_model.version
         meta_path = os.path.join(MODELS_DIR, f"{model_version}_meta.json")
         
+        # Scaler dosya yolunu oluştur
+        scaler_path = os.path.join(MODELS_DIR, f"{model_version}_scaler.joblib")
+        
         # Modelin var olup olmadığını kontrol et
         if not os.path.exists(full_model_path):
-            return None, None
+            logger.warning(f"Model dosyası bulunamadı: {full_model_path}")
+            return None, None, None
         
         # Modeli yükle
         model = joblib.load(full_model_path)
+        
+        # Scaler'ı yükle
+        scaler = None
+        if os.path.exists(scaler_path):
+            scaler = joblib.load(scaler_path)
+            logger.info(f"Scaler başarıyla yüklendi: {scaler_path}")
+        else:
+            logger.warning(f"Scaler dosyası bulunamadı: {scaler_path}")
         
         # Meta verileri yükle
         model_meta = active_model.metrics
@@ -259,13 +307,13 @@ async def load_model(inverter_id: int, db: Session) -> tuple:
             with open(meta_path, 'r') as f:
                 model_meta = json.load(f)
         
-        return model, model_meta
+        return model, scaler, model_meta
     
     except Exception as e:
         logger.error(f"Model yükleme hatası: {str(e)}")
         if db and db.is_active:
             db.rollback()
-        return None, None
+        return None, None, None
 
 async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> Dict[str, Any]:
     """
@@ -279,21 +327,25 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
         Dict: Hava durumu verileri
     """
     try:
+        # Timestamp'i tam saat olarak yuvarla
+        normalized_timestamp = timestamp.replace(minute=0, second=0, microsecond=0)
+        logger.info(f"Hava durumu verisi için normalize edilmiş zaman: {normalized_timestamp}")
+        
         # Tahmin zamanına en yakın hava durumu verisini bul
         weather_data = db.query(WeatherForecast).filter(
-            WeatherForecast.forecast_timestamp <= timestamp + timedelta(hours=1),
-            WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
+            WeatherForecast.forecast_timestamp <= normalized_timestamp + timedelta(hours=1),
+            WeatherForecast.forecast_timestamp >= normalized_timestamp - timedelta(hours=1)
         ).order_by(
             # En yakın zaman damgasına göre sırala
             func.abs(func.extract('epoch', WeatherForecast.forecast_timestamp) - 
-                   func.extract('epoch', timestamp))
+                   func.extract('epoch', normalized_timestamp))
         ).first()
         
         # Eğer veritabanında hava durumu verisi yoksa, API'den çek
         if not weather_data:
             # Önce o gün için veritabanında hiç veri var mı kontrol et
             # Bu şekilde API'ye her eksik saat için değil, sadece günlük bazda istek yapılır
-            start_of_day = datetime(timestamp.year, timestamp.month, timestamp.day)
+            start_of_day = datetime(normalized_timestamp.year, normalized_timestamp.month, normalized_timestamp.day)
             end_of_day = start_of_day + timedelta(days=1)
             
             existing_data_count = db.query(WeatherForecast).filter(
@@ -302,7 +354,7 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
             ).count()
             
             if existing_data_count == 0:
-                logger.info(f"{timestamp.date()} günü için hava durumu verisi bulunamadı. API'den çekiliyor...")
+                logger.info(f"{normalized_timestamp.date()} günü için hava durumu verisi bulunamadı. API'den çekiliyor...")
                 
                 # Inverter lokasyon bilgilerini al (burada örnek değerler, gerçek proje için ayarlanmalı)
                 latitude = 37.5704328 # Mersin
@@ -326,25 +378,25 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
                     
                     # Veritabanına kaydedilen veriyi tekrar sorgula
                     weather_data = db.query(WeatherForecast).filter(
-                        WeatherForecast.forecast_timestamp <= timestamp + timedelta(hours=1),
-                        WeatherForecast.forecast_timestamp >= timestamp - timedelta(hours=1)
+                        WeatherForecast.forecast_timestamp <= normalized_timestamp + timedelta(hours=1),
+                        WeatherForecast.forecast_timestamp >= normalized_timestamp - timedelta(hours=1)
                     ).order_by(
                         func.abs(func.extract('epoch', WeatherForecast.forecast_timestamp) - 
-                               func.extract('epoch', timestamp))
+                               func.extract('epoch', normalized_timestamp))
                     ).first()
                     
                     if not weather_data:
-                        logger.warning(f"API'den veri çekildi ancak istenen zaman ({timestamp}) için veri bulunamadı.")
+                        logger.warning(f"API'den veri çekildi ancak istenen zaman ({normalized_timestamp}) için veri bulunamadı.")
                         return None
                 except Exception as api_error:
                     logger.error(f"API'den hava durumu verisi çekilirken hata: {str(api_error)}")
                     return None
             else:
-                logger.info(f"{timestamp.date()} günü için DB'de {existing_data_count} kayıt var ama tam saat için eşleşme bulunamadı.")
+                logger.info(f"{normalized_timestamp.date()} günü için DB'de {existing_data_count} kayıt var ama tam saat için eşleşme bulunamadı.")
                 return None
         
         # Hava durumu verilerini sözlük olarak döndür
-        return {
+        weather_dict = {
             "temperature": weather_data.temperature,
             "shortwave_radiation": weather_data.shortwave_radiation,
             "direct_radiation": weather_data.direct_radiation,
@@ -354,8 +406,15 @@ async def _get_weather_data_for_prediction(timestamp: datetime, db: Session) -> 
             "terrestrial_radiation": weather_data.terrestrial_radiation,
             "relative_humidity": weather_data.relative_humidity,
             "wind_speed": weather_data.wind_speed,
-            "visibility": weather_data.visibility
         }
+        
+        # Veri kalitesi ön kontrolü
+        quality_issues = _check_data_quality(weather_dict, normalized_timestamp)
+        if quality_issues:
+            logger.warning(f"Hava durumu verisi kalite sorunları ({normalized_timestamp}): {quality_issues}")
+        
+        return weather_dict
+        
     except Exception as e:
         logger.error(f"Hava durumu verisi alma hatası: {str(e)}")
         if db and db.is_active:
@@ -373,26 +432,161 @@ def _prepare_features(weather_data: Dict[str, Any], timestamp: datetime) -> Dict
     Returns:
         Dict: Hazırlanmış özellikler
     """
+    # Timestamp'i tam saat olarak yuvarla
+    normalized_timestamp = timestamp.replace(minute=0, second=0, microsecond=0)
+    
     # Hava durumu verilerini kopyala
     features = dict(weather_data)
     
     # Zaman özelliklerini ekle
     features.update({
-        "hour": timestamp.hour,
-        "day": timestamp.day,
-        "month": timestamp.month,
-        "dayofweek": timestamp.weekday()
+        "hour": normalized_timestamp.hour,
+        "day": normalized_timestamp.day,
+        "month": normalized_timestamp.month,
+        "dayofweek": normalized_timestamp.weekday()
     })
     
-    # Trigonometrik zaman özellikleri ekle
+    # Trigonometrik zaman özellikleri ekle (model eğitimle tutarlı)
     features.update({
-        "hour_sin": np.sin(2 * np.pi * timestamp.hour / 24),
-        "hour_cos": np.cos(2 * np.pi * timestamp.hour / 24),
-        "day_sin": np.sin(2 * np.pi * timestamp.month / 12),
-        "day_cos": np.cos(2 * np.pi * timestamp.month / 12)
+        "hour_sin": np.sin(2 * np.pi * normalized_timestamp.hour / 24),
+        "hour_cos": np.cos(2 * np.pi * normalized_timestamp.hour / 24),
+        "day_sin": np.sin(2 * np.pi * normalized_timestamp.month / 12),  # Model eğitimde month kullanılıyor
+        "day_cos": np.cos(2 * np.pi * normalized_timestamp.month / 12)
     })
     
-    return features
+    # YENİ: Gelişmiş feature engineering (data quality service kullanarak)
+    # Önce DataFrame'e dönüştür
+    temp_df = pd.DataFrame([features])
+    
+    # Gelişmiş özellikler ekle
+    enhanced_df = DataQualityService.create_solar_aware_features(temp_df)
+    
+    # Geri sözlük formatına dönüştür
+    enhanced_features = enhanced_df.iloc[0].to_dict()
+    
+    # YENİ: Fiziksel kısıtlar ve validation
+    enhanced_features = _apply_physics_constraints(enhanced_features, normalized_timestamp)
+    
+    return enhanced_features
+
+def _apply_physics_constraints(features: Dict[str, Any], timestamp: datetime) -> Dict[str, Any]:
+    """
+    Fiziksel kısıtları uygular ve mantıksız değerleri düzeltir.
+    
+    Args:
+        features: Özellikler sözlüğü
+        timestamp: Zaman damgası
+        
+    Returns:
+        Düzeltilmiş özellikler
+    """
+    corrected_features = features.copy()
+    hour = timestamp.hour
+    
+    # 1. Gece saatleri (22:00-05:59) için güneş radyasyonu sıfır olmalı
+    if hour >= 22 or hour <= 5:
+        radiation_fields = [
+            'shortwave_radiation', 'direct_radiation', 'diffuse_radiation',
+            'direct_normal_irradiance', 'global_tilted_irradiance', 'terrestrial_radiation'
+        ]
+        
+        for field in radiation_fields:
+            if field in corrected_features and corrected_features[field] > 0:
+                logger.warning(f"Gece saatinde ({hour}:00) {field} > 0 ({corrected_features[field]}) düzeltiliyor")
+                corrected_features[field] = 0
+        
+        # İlgili composite features da güncellenmeli
+        if 'total_radiation_index' in corrected_features:
+            corrected_features['total_radiation_index'] = 0
+        if 'is_daylight' in corrected_features:
+            corrected_features['is_daylight'] = 0
+        if 'is_peak_solar' in corrected_features:
+            corrected_features['is_peak_solar'] = 0
+        if 'zero_radiation' in corrected_features:
+            corrected_features['zero_radiation'] = 1
+        if 'high_radiation' in corrected_features:
+            corrected_features['high_radiation'] = 0
+        if 'low_radiation' in corrected_features:
+            corrected_features['low_radiation'] = 1
+    
+    # 2. Sıcaklık makul aralıkta olmalı (-50°C ile +60°C arası)
+    if 'temperature' in corrected_features:
+        temp = corrected_features['temperature']
+        if temp < -50:
+            logger.warning(f"Çok düşük sıcaklık ({temp}°C) -50°C'ye ayarlanıyor")
+            corrected_features['temperature'] = -50
+        elif temp > 60:
+            logger.warning(f"Çok yüksek sıcaklık ({temp}°C) 60°C'ye ayarlanıyor")
+            corrected_features['temperature'] = 60
+    
+    # 3. Nem %0-100 arasında olmalı
+    if 'relative_humidity' in corrected_features:
+        humidity = corrected_features['relative_humidity']
+        if humidity < 0:
+            corrected_features['relative_humidity'] = 0
+        elif humidity > 100:
+            corrected_features['relative_humidity'] = 100
+    
+    # 4. Rüzgar hızı negatif olamaz ve makul üst sınır
+    if 'wind_speed' in corrected_features:
+        wind = corrected_features['wind_speed']
+        if wind < 0:
+            corrected_features['wind_speed'] = 0
+        elif wind > 200:  # 200 km/h üzeri çok yüksek
+            logger.warning(f"Çok yüksek rüzgar hızı ({wind} km/h) 200 km/h'ye ayarlanıyor")
+            corrected_features['wind_speed'] = 200
+    
+    return corrected_features
+
+def _check_data_quality(weather_data: Dict[str, Any], timestamp: datetime) -> List[str]:
+    """
+    Hava durumu verilerinin kalitesini kontrol eder.
+    
+    Args:
+        weather_data: Hava durumu verileri
+        timestamp: Zaman damgası
+        
+    Returns:
+        List[str]: Tespit edilen kalite sorunlarının listesi
+    """
+    issues = []
+    
+    # Gece saatlerinde güneş radyasyonu kontrolü
+    hour = timestamp.hour
+    if 22 <= hour or hour <= 5:  # Gece saatleri
+        if weather_data.get("shortwave_radiation", 0) > 50:
+            issues.append(f"Gece saatinde yüksek shortwave_radiation: {weather_data.get('shortwave_radiation')}")
+        if weather_data.get("direct_radiation", 0) > 30:
+            issues.append(f"Gece saatinde yüksek direct_radiation: {weather_data.get('direct_radiation')}")
+        if weather_data.get("global_tilted_irradiance", 0) > 50:
+            issues.append(f"Gece saatinde yüksek global_tilted_irradiance: {weather_data.get('global_tilted_irradiance')}")
+    
+    # Gündüz saatlerinde çok düşük değer kontrolü
+    elif 10 <= hour <= 15:  # Öğle saatleri
+        if weather_data.get("shortwave_radiation", 0) < 100 and weather_data.get("global_tilted_irradiance", 0) < 100:
+            issues.append("Öğle saatlerinde beklenenden düşük güneş radyasyonu")
+    
+    # Aşırı yüksek değer kontrolleri
+    if weather_data.get("shortwave_radiation", 0) > 1200:
+        issues.append(f"Aşırı yüksek shortwave_radiation: {weather_data.get('shortwave_radiation')}")
+    
+    if weather_data.get("temperature", 0) > 60 or weather_data.get("temperature", 0) < -40:
+        issues.append(f"Anormal sıcaklık değeri: {weather_data.get('temperature')}°C")
+    
+    if weather_data.get("wind_speed", 0) > 200:  # 200 km/h üzeri anormal
+        issues.append(f"Aşırı yüksek rüzgar hızı: {weather_data.get('wind_speed')} km/h")
+    
+    if weather_data.get("relative_humidity", 0) > 100 or weather_data.get("relative_humidity", 0) < 0:
+        issues.append(f"Anormal nem oranı: {weather_data.get('relative_humidity')}%")
+    
+    # NaN veya None değer kontrolleri
+    critical_fields = ["temperature", "shortwave_radiation", "relative_humidity"]
+    for field in critical_fields:
+        value = weather_data.get(field)
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            issues.append(f"Kritik alan eksik: {field}")
+    
+    return issues
 
 async def _make_dummy_prediction(inverter_id: int, timestamp: datetime, db: Session) -> InverterPrediction:
     """
@@ -719,7 +913,7 @@ async def evaluate_model_on_historical_data(
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
     
     # Aktif modeli yükle
-    model, model_meta = await load_model(inverter_id, db)
+    model, scaler, model_meta = await load_model(inverter_id, db)
     
     if model is None:
         raise ValueError(f"İnverter {inverter_id} için aktif model bulunamadı")
@@ -777,5 +971,131 @@ async def evaluate_model_on_historical_data(
             "r2": float(r2),
             "mape": float(mape)
         },
-        "model_version": model_meta.get("model_version", "unknown")
-    } 
+        "model_version": model_meta.get("model_version", "unknown"),
+        "scaler_used": scaler is not None
+    }
+
+def _apply_prediction_constraints(predicted_power: float, features: Dict[str, Any], timestamp: datetime) -> float:
+    """
+    Çok daha sıkı fiziksel kısıtları uygular - güneş enerjisi fizik kuralları.
+    
+    Args:
+        predicted_power: Ham tahmin değeri
+        features: Kullanılan özellikler
+        timestamp: Tahmin zamanı
+        
+    Returns:
+        Düzeltilmiş tahmin değeri
+    """
+    hour = timestamp.hour
+    
+    # 1. Negatif değerleri sıfırla
+    if predicted_power < 0:
+        logger.warning(f"Negatif tahmin değeri ({predicted_power:.2f}) sıfıra ayarlandı")
+        return 0.0
+    
+    # 2. Gece saatleri kontrolü (22:00-05:59) - KATIYECI
+    if hour >= 22 or hour <= 5:
+        if predicted_power > 0:
+            logger.warning(f"Gece saatinde ({hour}:00) pozitif tahmin ({predicted_power:.2f}) sıfıra ayarlandı")
+        return 0.0
+    
+    # 3. Güneş radyasyonu kontrolü - ÇOK SIKI
+    total_radiation = features.get('total_radiation_index', 0) or features.get('shortwave_radiation', 0)
+    shortwave_radiation = features.get('shortwave_radiation', 0)
+    
+    # Sıfır radyasyon = sıfır güç
+    if total_radiation == 0 or shortwave_radiation == 0:
+        if predicted_power > 0:
+            logger.warning(f"Sıfır radyasyonda tahmin ({predicted_power:.2f}) sıfıra ayarlandı")
+        return 0.0
+    
+    # 4. Radyasyon-güç ilişkisi KATIYECI SINIRLARI
+    # Teorik maksimum: ~4-5 kW per 1000 W/m² (panel verimliliğine bağlı)
+    max_efficiency_ratio = 4.5  # kW per 1000 W/m²
+    
+    # Çok düşük radyasyon durumları
+    if shortwave_radiation < 50:  # 50 W/m² altında
+        max_allowed_power = shortwave_radiation * 0.5  # Çok düşük verimlilik
+        if predicted_power > max_allowed_power:
+            logger.warning(f"Çok düşük radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            return max_allowed_power
+    
+    elif shortwave_radiation < 200:  # 200 W/m² altında
+        max_allowed_power = shortwave_radiation * 1.5
+        if predicted_power > max_allowed_power:
+            logger.warning(f"Düşük radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            return max_allowed_power
+    
+    elif shortwave_radiation < 500:  # Orta seviye radyasyon
+        max_allowed_power = shortwave_radiation * 3.0
+        if predicted_power > max_allowed_power:
+            logger.warning(f"Orta radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            return max_allowed_power
+    
+    else:  # Yüksek radyasyon
+        max_allowed_power = shortwave_radiation * max_efficiency_ratio
+        if predicted_power > max_allowed_power:
+            logger.warning(f"Yüksek radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            return max_allowed_power
+    
+    # 5. Aşırı yüksek değer kontrolü (inverter kapasitesi)
+    max_inverter_capacity = 5000  # 5 MW
+    if predicted_power > max_inverter_capacity:
+        logger.warning(f"Kapasiteyi aşan tahmin ({predicted_power:.2f}) {max_inverter_capacity}'ye sınırlandı")
+        return max_inverter_capacity
+    
+    # 6. Sabah/akşam saatleri için KATIYECI sınır
+    if 6 <= hour <= 8:  # Sabah saatleri
+        hour_factor = max(0.1, (hour - 5) / 3)  # 0.1-1.0 arası
+        max_allowed = min(1000, predicted_power * hour_factor)  # Maksimum 1000 kW sabah
+        if predicted_power > max_allowed:
+            logger.info(f"Sabah saati ({hour}:00) tahmin düzeltmesi: {predicted_power:.2f} -> {max_allowed:.2f}")
+            return max_allowed
+    
+    elif 18 <= hour <= 21:  # Akşam saatleri
+        hour_factor = max(0.1, (22 - hour) / 4)  # 1.0-0.1 arası
+        max_allowed = min(1000, predicted_power * hour_factor)  # Maksimum 1000 kW akşam
+        if predicted_power > max_allowed:
+            logger.info(f"Akşam saati ({hour}:00) tahmin düzeltmesi: {predicted_power:.2f} -> {max_allowed:.2f}")
+            return max_allowed
+    
+    # 7. Hava durumu tabanlı AGRESIF düzeltmeler
+    if 'relative_humidity' in features and features['relative_humidity'] > 85:
+        # Yüksek nemde panel verimliliği ciddi şekilde düşer
+        humidity_factor = max(0.5, 1 - (features['relative_humidity'] - 50) / 100)
+        corrected_power = predicted_power * humidity_factor
+        if abs(corrected_power - predicted_power) > 10:
+            logger.info(f"Yüksek nem düzeltmesi (%{features['relative_humidity']}): {predicted_power:.2f} -> {corrected_power:.2f}")
+        predicted_power = corrected_power
+    
+    if 'temperature' in features and features['temperature'] > 40:
+        # Yüksek sıcaklıkta panel verimi ciddi şekilde düşer
+        temp_factor = max(0.6, 1 - (features['temperature'] - 25) / 50)
+        corrected_power = predicted_power * temp_factor
+        if abs(corrected_power - predicted_power) > 10:
+            logger.info(f"Yüksek sıcaklık düzeltmesi ({features['temperature']}°C): {predicted_power:.2f} -> {corrected_power:.2f}")
+        predicted_power = corrected_power
+    
+    # 8. Bulutlu hava durumu kontrolü (diffuse radiation yüksek, direct düşük)
+    if 'direct_radiation' in features and 'diffuse_radiation' in features:
+        direct_rad = features['direct_radiation']
+        diffuse_rad = features['diffuse_radiation']
+        
+        if direct_rad > 0 and diffuse_rad > 0:
+            diffuse_ratio = diffuse_rad / (direct_rad + diffuse_rad)
+            if diffuse_ratio > 0.7:  # %70'den fazla diffuse = bulutlu
+                cloud_factor = max(0.7, 1 - diffuse_ratio * 0.5)
+                corrected_power = predicted_power * cloud_factor
+                if abs(corrected_power - predicted_power) > 10:
+                    logger.info(f"Bulutlu hava düzeltmesi (diffuse ratio: %{diffuse_ratio*100:.1f}): {predicted_power:.2f} -> {corrected_power:.2f}")
+                predicted_power = corrected_power
+    
+    # 9. Final güvenlik kontrolü - çok düşük radyasyonda çok yüksek güç
+    if shortwave_radiation < 100 and predicted_power > 100:
+        final_power = min(predicted_power, shortwave_radiation)
+        if final_power != predicted_power:
+            logger.warning(f"Final güvenlik kontrolü: radyasyon {shortwave_radiation}, tahmin {predicted_power:.2f} -> {final_power:.2f}")
+        return final_power
+    
+    return predicted_power 
