@@ -11,6 +11,11 @@ Job yönetiminin merkezileştirilmesi, kümülatif inverter verilerinin saatlik 
 - Model eğitimi sonrası gelecek hava durumu tahminlerinin otomatik çekilmesi sağlandı
 - Kritik noktalarda loglama eklendi
 - Tüm job'ların durumu ve geçmişi izlemek için API endpoint'leri oluşturuldu
+- **YENİ**: Prediction service'te enerji üretimi sınırları düzeltildi (1.2 MW hedefi için)
+  - Radyasyon-güç ilişkisi sınırları güncellendi
+  - Sabah/akşam saatleri sınırları artırıldı (yaz: 800-900 kW, diğer: 600-700 kW)
+  - Mevsimsel boost faktörleri eklendi (%50 yaz, %20 bahar/sonbahar)
+  - Final güvenlik kontrolleri esnek hale getirildi
 
 ## Yeni Gereksinimler
 - Yeni job yönetimi ve data processing yapısının test edilmesi

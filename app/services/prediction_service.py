@@ -1010,33 +1010,45 @@ def _apply_prediction_constraints(predicted_power: float, features: Dict[str, An
             logger.warning(f"Sıfır radyasyonda tahmin ({predicted_power:.2f}) sıfıra ayarlandı")
         return 0.0
     
-    # 4. Radyasyon-güç ilişkisi KATIYECI SINIRLARI
-    # Teorik maksimum: ~4-5 kW per 1000 W/m² (panel verimliliğine bağlı)
-    max_efficiency_ratio = 4.5  # kW per 1000 W/m²
+    # 4. Radyasyon-güç ilişkisi - GÜNCELLENMIŞ SINIRLARI (1.2 MW hedefi)
+    # Teorik maksimum: ~1.5-2.0 kW per 1000 W/m² (büyük sistem verimliliği)
+    max_efficiency_ratio = 2.0  # kW per 1000 W/m² (büyük sistemler için daha gerçekçi)
     
-    # Çok düşük radyasyon durumları
+    # Mevsimsel faktör (yaz aylarında daha yüksek)
+    month = timestamp.month
+    seasonal_efficiency_boost = 1.0
+    if month in [6, 7, 8]:  # Yaz ayları - yüksek radyasyon
+        seasonal_efficiency_boost = 1.5
+    elif month in [4, 5, 9, 10]:  # İlkbahar/sonbahar - orta
+        seasonal_efficiency_boost = 1.2
+    
+    # Düşük radyasyon durumları için daha esnek sınırlar
     if shortwave_radiation < 50:  # 50 W/m² altında
-        max_allowed_power = shortwave_radiation * 0.5  # Çok düşük verimlilik
+        max_allowed_power = max(50, shortwave_radiation * 1.0)  # Min 50 kW
         if predicted_power > max_allowed_power:
-            logger.warning(f"Çok düşük radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            logger.info(f"Çok düşük radyasyon ({shortwave_radiation}) tahmin sınırı: {predicted_power:.2f} -> {max_allowed_power:.2f}")
             return max_allowed_power
     
     elif shortwave_radiation < 200:  # 200 W/m² altında
-        max_allowed_power = shortwave_radiation * 1.5
+        max_allowed_power = shortwave_radiation * 2.5 * seasonal_efficiency_boost
         if predicted_power > max_allowed_power:
-            logger.warning(f"Düşük radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            logger.info(f"Düşük radyasyon ({shortwave_radiation}) tahmin sınırı: {predicted_power:.2f} -> {max_allowed_power:.2f}")
             return max_allowed_power
     
     elif shortwave_radiation < 500:  # Orta seviye radyasyon
-        max_allowed_power = shortwave_radiation * 3.0
+        max_allowed_power = shortwave_radiation * 2.0 * seasonal_efficiency_boost
         if predicted_power > max_allowed_power:
-            logger.warning(f"Orta radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            logger.info(f"Orta radyasyon ({shortwave_radiation}) tahmin sınırı: {predicted_power:.2f} -> {max_allowed_power:.2f}")
             return max_allowed_power
     
-    else:  # Yüksek radyasyon
-        max_allowed_power = shortwave_radiation * max_efficiency_ratio
+    else:  # Yüksek radyasyon (>500 W/m²)
+        max_allowed_power = shortwave_radiation * max_efficiency_ratio * seasonal_efficiency_boost
+        # Yaz aylarında çok yüksek radyasyonda 1.2 MW'a kadar izin ver
+        if month in [6, 7, 8] and shortwave_radiation > 800:
+            max_allowed_power = min(1200, max_allowed_power)  # 1.2 MW maksimum
+        
         if predicted_power > max_allowed_power:
-            logger.warning(f"Yüksek radyasyon ({shortwave_radiation}) tahmin ({predicted_power:.2f}) -> {max_allowed_power:.2f}")
+            logger.info(f"Yüksek radyasyon ({shortwave_radiation}) tahmin sınırı: {predicted_power:.2f} -> {max_allowed_power:.2f}")
             return max_allowed_power
     
     # 5. Aşırı yüksek değer kontrolü (inverter kapasitesi)
@@ -1045,18 +1057,22 @@ def _apply_prediction_constraints(predicted_power: float, features: Dict[str, An
         logger.warning(f"Kapasiteyi aşan tahmin ({predicted_power:.2f}) {max_inverter_capacity}'ye sınırlandı")
         return max_inverter_capacity
     
-    # 6. Sabah/akşam saatleri için KATIYECI sınır
-    if 6 <= hour <= 8:  # Sabah saatleri
-        hour_factor = max(0.1, (hour - 5) / 3)  # 0.1-1.0 arası
-        max_allowed = min(1000, predicted_power * hour_factor)  # Maksimum 1000 kW sabah
-        if predicted_power > max_allowed:
+    # 6. Sabah/akşam saatleri için GÜNCELLENMIŞ esnek sınırlar (1.2 MW hedefi)
+    if 6 <= hour <= 8:  # Sabah saatleri - daha esnek
+        hour_factor = max(0.3, (hour - 5) / 3)  # 0.3-1.0 arası (daha yüksek başlangıç)
+        # Yaz aylarında sabah saatleri için daha yüksek sınır
+        max_morning = 800 if month in [6, 7, 8] else 600  # Yaz: 800kW, diğer: 600kW
+        max_allowed = min(max_morning, predicted_power / hour_factor)  # Ters orantı yerine daha esnek
+        if predicted_power > max_allowed and max_allowed < predicted_power * 0.7:  # Sadece çok büyük farklarda müdahale
             logger.info(f"Sabah saati ({hour}:00) tahmin düzeltmesi: {predicted_power:.2f} -> {max_allowed:.2f}")
             return max_allowed
     
-    elif 18 <= hour <= 21:  # Akşam saatleri
-        hour_factor = max(0.1, (22 - hour) / 4)  # 1.0-0.1 arası
-        max_allowed = min(1000, predicted_power * hour_factor)  # Maksimum 1000 kW akşam
-        if predicted_power > max_allowed:
+    elif 17 <= hour <= 20:  # Akşam saatleri - daha esnek aralık ve sınır
+        hour_factor = max(0.4, (21 - hour) / 4)  # 1.0-0.4 arası (daha yüksek minimum)
+        # Yaz aylarında akşam saatleri için daha yüksek sınır  
+        max_evening = 900 if month in [6, 7, 8] else 700  # Yaz: 900kW, diğer: 700kW
+        max_allowed = min(max_evening, predicted_power / hour_factor)  # Daha esnek hesaplama
+        if predicted_power > max_allowed and max_allowed < predicted_power * 0.7:  # Sadık çok büyük farklarda müdahale
             logger.info(f"Akşam saati ({hour}:00) tahmin düzeltmesi: {predicted_power:.2f} -> {max_allowed:.2f}")
             return max_allowed
     
@@ -1091,11 +1107,18 @@ def _apply_prediction_constraints(predicted_power: float, features: Dict[str, An
                     logger.info(f"Bulutlu hava düzeltmesi (diffuse ratio: %{diffuse_ratio*100:.1f}): {predicted_power:.2f} -> {corrected_power:.2f}")
                 predicted_power = corrected_power
     
-    # 9. Final güvenlik kontrolü - çok düşük radyasyonda çok yüksek güç
-    if shortwave_radiation < 100 and predicted_power > 100:
-        final_power = min(predicted_power, shortwave_radiation)
+    # 9. Final güvenlik kontrolü - ESNEK hale getirildi (1.2 MW hedefi)
+    # Sadece çok extreme durumlarda müdahale et
+    if shortwave_radiation < 50 and predicted_power > 300:  # Çok düşük radyasyon + çok yüksek tahmin
+        final_power = min(predicted_power, shortwave_radiation * 3)  # 3x faktör ile daha esnek
         if final_power != predicted_power:
-            logger.warning(f"Final güvenlik kontrolü: radyasyon {shortwave_radiation}, tahmin {predicted_power:.2f} -> {final_power:.2f}")
+            logger.info(f"Final güvenlik kontrolü: radyasyon {shortwave_radiation}, tahmin {predicted_power:.2f} -> {final_power:.2f}")
+        return final_power
+    
+    # Çok aşırı durumlar için ek kontrol (çok düşük radyasyon + MW seviyesi tahmin)
+    elif shortwave_radiation < 20 and predicted_power > 500:
+        final_power = 100  # Minimum makul değer
+        logger.warning(f"Aşırı düşük radyasyon kontrolü: radyasyon {shortwave_radiation}, tahmin {predicted_power:.2f} -> {final_power:.2f}")
         return final_power
     
     return predicted_power 

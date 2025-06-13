@@ -35,6 +35,7 @@
 - TXT yükleme işlemi geliştirildi ve tüm süreç tek bir job içinde toplandı
 - Kritik noktalarda loglama eklendi
 - Model eğitimi sonrası gelecek hava durumu tahminlerinin otomatik çekilmesi sağlandı
+- Prediction service'te enerji üretimi sınırları düzeltildi (1.2 MW hedefine uygun)
 
 ## Devam Edenler
 - Yeni job yönetimi ve data processing yapısının test edilmesi
@@ -82,6 +83,7 @@
 - [x] TXT yükleme işleminin geliştirilmesi ve tüm sürecin tek bir job içinde toplanması
 - [x] Kritik noktalarda loglama eklenmesi
 - [x] Model eğitimi sonrası gelecek hava durumu tahminlerinin otomatik çekilmesi
+- [x] Prediction service'te enerji üretimi sınırları düzeltildi (1.2 MW hedefine uygun)
 - [ ] Yeni job yönetimi ve data processing yapısının test edilmesi
 - [ ] API'lar arası entegrasyonların doğrulanması
 - [ ] Yeni yapının kullanıcılara tanıtılması
